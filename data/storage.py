@@ -116,3 +116,58 @@ def load_portfolio() -> dict:
     finally:
         conn.close()
     return {"cash": 20000.0, "holdings": {}, "total_value": 20000.0}
+
+
+def save_stock_daily(df: pd.DataFrame, symbol: str):
+    """将个股日线数据追加存入 SQLite（增量，去重）"""
+    conn = get_connection()
+    table_name = f"stock_{symbol}"
+
+    existing = pd.DataFrame()
+    try:
+        existing = pd.read_sql(f"SELECT date FROM {table_name}", conn)
+    except Exception:
+        pass
+
+    if not existing.empty:
+        existing_dates = set(pd.to_datetime(existing["date"]).dt.strftime("%Y-%m-%d"))
+        df = df.copy()
+        df["date_str"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        new_rows = df[~df["date_str"].isin(existing_dates)]
+        new_rows = new_rows.drop(columns=["date_str"])
+        if not new_rows.empty:
+            new_rows.to_sql(table_name, conn, if_exists="append", index=False)
+            logger.info(f"增量追加 {symbol}: +{len(new_rows)} 条")
+        else:
+            logger.info(f"{symbol} 数据已是最新")
+    else:
+        df.to_sql(table_name, conn, if_exists="replace", index=False)
+        logger.info(f"已保存 {symbol} 日线数据: {len(df)} 条 -> {table_name}")
+
+    conn.close()
+
+
+def load_stock_daily(symbol: str) -> pd.DataFrame:
+    """从 SQLite 加载个股日线数据"""
+    conn = get_connection()
+    table_name = f"stock_{symbol}"
+    try:
+        df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        df["date"] = pd.to_datetime(df["date"])
+        return df
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def list_cached_stocks() -> list:
+    """列出本地已缓存日线数据的股票代码"""
+    conn = get_connection()
+    try:
+        tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'", conn)
+        return [t.replace("stock_", "") for t in tables["name"].tolist()]
+    except Exception:
+        return []
+    finally:
+        conn.close()

@@ -8,7 +8,8 @@ A股量化交易系统 - 主入口
   python main.py sentiment          # 市场情绪分析
   python main.py train              # 训练/更新 ML 模型
   python main.py predict            # ML 模型预测选股
-  python main.py fetch              # 下载历史数据
+  python main.py fetch              # 下载 ETF 历史数据
+  python main.py fetch-all [--limit N] [--refresh]  # 批量下载全市场股票日线
   python main.py portfolio          # 查看持仓
   python main.py deploy [--push] [--simulate]  # 统一部署（生成今日操作清单）
   python main.py evolve [--push]    # 自动进化（训练+对比+替换+报告）
@@ -285,6 +286,14 @@ def main():
         run_predict()
     elif command == "fetch":
         fetch_data()
+    elif command == "fetch-all":
+        from data.bulk_fetcher import bulk_fetch
+        _limit = 0
+        _refresh = "--refresh" in sys.argv
+        if "--limit" in sys.argv:
+            idx = sys.argv.index("--limit")
+            _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
+        bulk_fetch(limit=_limit, refresh=_refresh)
     elif command == "portfolio":
         from alert.daily_runner import show_portfolio
         show_portfolio()

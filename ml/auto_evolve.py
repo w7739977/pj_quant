@@ -81,19 +81,20 @@ def evolve(push: bool = False) -> dict:
         stock_list = []
         while rs.error_code == "0" and rs.next():
             row = rs.get_row_data()
-            # row: [code, tradeStatus, code_name, ipoDate, outDate, type]
-            # code format: sh.600000, sz.000001
+            # row: [code, name, ipoDate, outDate, type, tradeStatus]
+            # type: 1=股票, 2=指数; tradeStatus: 1=上市
             code = row[0] if len(row) > 0 else ""
-            name = row[2] if len(row) > 2 else ""
-            stype = row[5] if len(row) > 5 else ""
-            # type=1 表示股票, 排除 ST/退市/北交所/科创板
-            if stype == "1" and "ST" not in name and "退" not in name:
+            name = row[1] if len(row) > 1 else ""
+            stype = row[4] if len(row) > 4 else ""
+            trade_status = row[5] if len(row) > 5 else ""
+            # type=1(股票) + tradeStatus=1(上市), 排除 ST/退市/北交所/科创板
+            if stype == "1" and trade_status == "1" and "ST" not in name and "退" not in name:
                 pure_code = code.split(".")[-1] if "." in code else code
                 if pure_code.startswith(("8", "688", "9")):
                     continue
                 stock_list.append(pure_code)
         bs.logout()
-        symbols = stock_list[:500]  # 最多 500 只
+        symbols = stock_list  # 全量股票
     else:
         symbols = pool["code"].tolist()
     print(f"  股票池: {len(symbols)} 只")

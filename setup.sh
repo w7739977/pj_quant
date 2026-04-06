@@ -62,7 +62,8 @@ echo "  ✓ 目录就绪"
 if [[ "$1" != "--skip-data" ]]; then
     echo -e "${YELLOW}[5/6] 下载历史数据（首次可能需要几分钟）...${NC}"
     python3 main.py fetch
-    echo "  ✓ 数据下载完成"
+    echo "  ✓ ETF 数据下载完成"
+    echo -e "  ${YELLOW}提示: 运行 python3 main.py fetch-all 批量获取全市场股票数据（约30-60分钟）${NC}"
 else
     echo -e "${YELLOW}[5/6] 跳过数据下载 (--skip-data)${NC}"
 fi
