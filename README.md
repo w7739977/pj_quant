@@ -1,0 +1,164 @@
+# pj_quant - A股量化交易系统
+
+2万小资金 A 股量化实盘系统，整合 **ETF轮动 + 小盘多因子 + ML预测 + 情绪分析**。
+
+## 系统架构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                  统一组合引擎 (deploy)                     │
+│                                                          │
+│  市场情绪 ──→ 动态资金分配 ──→ 信号生成 ──→ 操作清单      │
+│                                                          │
+│  偏多: ETF 30% | 个股 70%                                │
+│  中性: ETF 50% | 个股 50%                                │
+│  偏空: ETF 80%(含国债) | 个股 20%                         │
+│                                                          │
+│  个股 = 小盘多因子 ∩ ML预测 (交集加分)                    │
+└──────────────────────────────────────────────────────────┘
+```
+
+## 快速开始
+
+```bash
+# 一键部署（安装依赖 + 初始化 + 首次运行）
+bash setup.sh
+
+# 或手动安装
+pip install -r requirements.txt
+python main.py fetch        # 下载历史数据
+python main.py train        # 训练ML模型
+python main.py deploy       # 生成今日操作清单
+```
+
+## 命令一览
+
+| 命令 | 说明 |
+|------|------|
+| `python main.py deploy [--push] [--simulate]` | **统一部署**：情绪+分配+选股+推送 |
+| `python main.py backtest` | ETF轮动策略回测 |
+| `python main.py signal [--push]` | ETF轮动信号 |
+| `python main.py smallcap` | 小盘多因子选股 |
+| `python main.py sentiment` | 市场情绪分析 |
+| `python main.py train` | 训练XGBoost模型 |
+| `python main.py predict` | ML选股预测 |
+| `python main.py fetch` | 下载历史数据 |
+| `python main.py portfolio` | 查看持仓 |
+| `python main.py evolve [--push]` | 模型自动进化 |
+| `python main.py evolve-history` | 查看进化记录 |
+
+## 项目结构
+
+```
+pj_quant/
+├── main.py                    # CLI 入口
+├── setup.sh                   # 一键部署脚本
+├── run_daily.sh               # 每日定时任务（crontab）
+├── run_monthly_evolve.sh      # 每月模型进化
+├── requirements.txt           # Python 依赖
+│
+├── config/
+│   └── settings.py            # 全局配置
+│
+├── data/
+│   ├── fetcher.py             # 数据获取（东方财富/AKShare/BaoStock/腾讯/新浪）
+│   └── storage.py             # SQLite 存储 + 增量缓存
+│
+├── strategy/
+│   ├── base.py                # 策略基类
+│   ├── etf_rotation.py        # ETF动量轮动策略
+│   └── small_cap.py           # 小盘多因子选股策略
+│
+├── factors/
+│   ├── calculator.py          # 因子计算（20个因子，含情绪因子）
+│   └── data_loader.py         # 股票池+行情数据加载
+│
+├── ml/
+│   ├── ranker.py              # XGBoost选股模型 + 版本管理
+│   └── auto_evolve.py         # 自动进化（训练+对比+替换）
+│
+├── sentiment/
+│   └── analyzer.py            # 双模型情绪分析（glm-4-flash + GLM-5）
+│
+├── portfolio/
+│   ├── allocator.py           # 统一组合引擎
+│   └── tracker.py             # 持仓跟踪
+│
+├── backtest/
+│   └── engine.py              # 回测引擎
+│
+├── alert/
+│   ├── daily_runner.py        # 每日信号生成
+│   └── notify.py              # 微信推送（PushPlus）
+│
+└── tests/
+```
+
+## 核心模块
+
+### 1. 统一组合引擎 (portfolio/allocator.py)
+
+整合三大策略，生成每日操作清单：
+- **市场情绪** → glm-4-flash快速标注 + GLM-5深度推理，加权融合
+- **资金分配** → 情绪驱动，激进偏多70%个股 / 防守偏空80%ETF
+- **ETF信号** → 5只ETF动量轮动，含国债ETF防守
+- **个股精选** → 小盘多因子排名 ∩ ML预测排名，双重确认加分
+
+### 2. 数据获取 (data/fetcher.py)
+
+5级数据源自动降级，本地SQLite缓存：
+1. 东方财富（最快）
+2. AKShare（最全）
+3. BaoStock（无限制）
+4. 腾讯API（实时行情）
+5. 新浪API（盘口数据）
+
+### 3. 情绪分析 (sentiment/analyzer.py)
+
+双模型协作 + 多源新闻：
+- glm-4-flash：批量情绪标注（快速、低成本）
+- GLM-5：深度推理分析（慢、高质量）
+- 新闻源：东方财富 + Brave Search
+- 权重：flash 70% + GLM-5 30%
+
+### 4. ML模型 (ml/ranker.py)
+
+XGBoost回归，20个因子（含情绪因子）：
+- 滚动截面训练，5折交叉验证
+- 自动版本管理：新模型R²更高则自动替换
+- 因子重要性追踪
+
+### 5. 自动进化 (ml/auto_evolve.py)
+
+每月闭环迭代：
+1. 获取旧模型基准
+2. 更新股票池 + 行情
+3. 滚动计算因子（含情绪）
+4. 训练新模型 + 对比R²
+5. 更优则上线，否则保留
+
+## 定时任务
+
+```bash
+# 每日部署（周一至周五 15:30）
+30 15 * * 1-5 /path/to/pj_quant/run_daily.sh >> /path/to/pj_quant/logs/daily.log 2>&1
+
+# 每月进化（每月1号 16:00）
+0 16 1 * * /path/to/pj_quant/run_monthly_evolve.sh >> /path/to/pj_quant/logs/evolve.log 2>&1
+```
+
+## ETF标的池
+
+| 代码 | 名称 | 定位 |
+|------|------|------|
+| 510300 | 沪深300ETF | 大盘蓝筹 |
+| 510500 | 中证500ETF | 中盘成长 |
+| 159915 | 创业板ETF | 科技成长 |
+| 513100 | 纳指100ETF | 海外配置 |
+| 511010 | 国债ETF | 防御资产 |
+
+## 风险提示
+
+- 本项目仅供学习研究，不构成投资建议
+- 量化交易不保证盈利，历史回测不代表未来表现
+- 资金有风险，投资需谨慎
