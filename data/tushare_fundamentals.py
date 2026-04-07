@@ -195,8 +195,60 @@ def import_to_sqlite(limit=0):
 
     conn.close()
     elapsed = time.time() - t0
+
+    # ===== 验证入库结果 =====
+    print("\n  验证入库结果...")
+    _verify_import()
+
     print(f"\n入库完成: {len(updated_stocks)} 只股票已更新, 耗时={elapsed/60:.1f}min")
     return len(updated_stocks)
+
+
+def _verify_import(sample_date=None):
+    """验证入库数据正确性 (对比 Parquet 源文件)"""
+    import os
+    if sample_date is None:
+        # 取中间某个日期验证
+        files = sorted(f for f in os.listdir(PARQUET_DIR) if f.endswith(".parquet"))
+        if not files:
+            return
+        sample_date = files[len(files)//2].replace(".parquet", "")
+
+    parquet_path = os.path.join(PARQUET_DIR, f"{sample_date}.parquet")
+    if not os.path.exists(parquet_path):
+        return
+
+    source_df = pd.read_parquet(parquet_path)
+    source_df["code"] = source_df["ts_code"].str.split(".").str[0]
+
+    # 抽查3只股票
+    conn = sqlite3.connect(DB_PATH)
+    test_codes = source_df["code"].head(3).tolist()
+
+    for code in test_codes:
+        table = f"stock_{code}"
+        date_str = f"{sample_date[:4]}-{sample_date[4:6]}-{sample_date[6:8]}"
+
+        row = source_df[source_df["code"] == code].iloc[0]
+        local = conn.execute(
+            f"SELECT pe_ttm, pb, ps_ttm, turnover_rate, volume_ratio FROM {table} "
+            f"WHERE date(date) = ?", (date_str,)
+        ).fetchone()
+
+        if local:
+            match = True
+            for i, col in enumerate(["pe_ttm", "pb", "ps_ttm", "turnover_rate", "volume_ratio"]):
+                src_val = row.get(col)
+                local_val = local[i]
+                if pd.notna(src_val) and pd.notna(local_val):
+                    if abs(float(src_val) - float(local_val)) > 0.01:
+                        match = False
+            status = "✓" if match else "✗"
+            print(f"    {code} {date_str}: {status}")
+        else:
+            print(f"    {code} {date_str}: ✗ (无记录)")
+
+    conn.close()
 
 
 def run(limit=0):

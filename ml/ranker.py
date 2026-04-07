@@ -54,6 +54,7 @@ def prepare_training_data(
 
     不依赖实时网络，全部从本地 SQLite 读取。
     使用历史滚动窗口生成多个截面样本。
+    **修复**: 基本面因子从 SQLite 读取实际值，不再用 NaN 占位。
 
     Parameters
     ----------
@@ -90,7 +91,7 @@ def prepare_training_data(
 
                 forward_return = float(fwd.iloc[-1]["close"]) / float(fwd.iloc[0]["close"]) - 1.0
 
-                # 计算该截面的因子
+                # 计算该截面的技术因子
                 factors = {"code": sym, "label": forward_return}
                 factors.update(calc_momentum(window))
                 factors.update(calc_volatility(window))
@@ -98,9 +99,15 @@ def prepare_training_data(
                 factors.update(calc_volume_price(window))
                 factors.update(calc_technical(window))
 
-                # 基本面因子用 NaN 占位（非截面相关）
-                for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio", "sentiment_score"]:
-                    factors[col] = np.nan
+                # **修复**: 从 window 最后一行获取基本面因子（当日值）
+                last_row = window.iloc[-1]
+                factors["pe_ttm"] = last_row.get("pe_ttm", np.nan)
+                factors["pb"] = last_row.get("pb", np.nan)
+                factors["turnover_rate"] = last_row.get("turnover_rate", np.nan)
+                factors["volume_ratio"] = last_row.get("volume_ratio", np.nan)
+
+                # 情绪因子暂用 NaN（需实时调用）
+                factors["sentiment_score"] = np.nan
 
                 records.append(factors)
         except Exception:
@@ -111,6 +118,13 @@ def prepare_training_data(
 
     train_df = pd.DataFrame(records)
     logger.info(f"  训练样本生成完成: {len(train_df)} 条 ({len(symbols)} 只股票)")
+
+    # 打印基本面因子使用率
+    fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]
+    for col in fund_cols:
+        non_null = train_df[col].notna().sum()
+        logger.info(f"    {col}: {non_null}/{len(train_df)} ({non_null*100/len(train_df):.1f}%) 有数据")
+
     return train_df
 
 
