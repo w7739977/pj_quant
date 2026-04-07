@@ -42,3 +42,7 @@ env/
 
 # Model history
 ml/model_history.json
+# 训练中间数据
+data/fundamentals_parquet/
+ml/training_chunks/
+*.parquet
