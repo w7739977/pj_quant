@@ -50,48 +50,68 @@ def prepare_training_data(
     end_date: str = None,
 ) -> pd.DataFrame:
     """
-    准备训练数据: 因子 + 未来N日收益率(标签)
+    准备训练数据: 基于本地缓存的滚动截面生成 (因子 + 未来N日收益率)
+
+    不依赖实时网络，全部从本地 SQLite 读取。
+    使用历史滚动窗口生成多个截面样本。
 
     Parameters
     ----------
-    factor_df : DataFrame  因子矩阵（来自 compute_stock_pool_factors）
-    forward_days : int  前瞻天数（标签 = 未来N日收益率）
-    end_date : str  因子计算截止日
+    factor_df : DataFrame  当日因子矩阵（用于确定股票池）
+    forward_days : int  前瞻天数
+    end_date : str  未使用，保留接口兼容
 
     Returns
     -------
     DataFrame: 含 feature_cols + label 列
     """
-    if end_date is None:
-        end_date = datetime.now().strftime("%Y-%m-%d")
+    from data.storage import load_stock_daily
+    from factors.calculator import (
+        calc_momentum, calc_volatility, calc_turnover_factor,
+        calc_volume_price, calc_technical,
+    )
 
-    records = []
     symbols = factor_df["code"].tolist()
     total = len(symbols)
+    records = []
 
     for i, sym in enumerate(symbols):
         try:
-            df = get_stock_daily(sym, end_date, datetime.now().strftime("%Y-%m-%d"))
-            if df is None or len(df) < forward_days + 5:
+            df = load_stock_daily(sym)
+            if df.empty or len(df) < 120:
                 continue
 
-            # 取因子计算日的收盘价 vs N日后收盘价
-            current_price = df.iloc[-(forward_days + 1)]["close"]
-            future_price = df.iloc[-1]["close"]
-            forward_return = (future_price / current_price - 1.0)
+            # 滚动截面：每 20 天取一个样本
+            for end_idx in range(60, len(df) - forward_days, 20):
+                window = df.iloc[:end_idx + 1]
+                fwd = df.iloc[end_idx:end_idx + forward_days + 1]
+                if len(fwd) < forward_days + 1:
+                    continue
 
-            row = factor_df[factor_df["code"] == sym].iloc[0]
-            record = {"code": sym, "label": forward_return}
-            for col in FEATURE_COLS:
-                record[col] = row.get(col, np.nan)
-            records.append(record)
+                forward_return = float(fwd.iloc[-1]["close"]) / float(fwd.iloc[0]["close"]) - 1.0
 
-            if (i + 1) % 100 == 0:
-                logger.info(f"  准备训练数据: {i+1}/{total}")
+                # 计算该截面的因子
+                factors = {"code": sym, "label": forward_return}
+                factors.update(calc_momentum(window))
+                factors.update(calc_volatility(window))
+                factors.update(calc_turnover_factor(window))
+                factors.update(calc_volume_price(window))
+                factors.update(calc_technical(window))
+
+                # 基本面因子用 NaN 占位（非截面相关）
+                for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio", "sentiment_score"]:
+                    factors[col] = np.nan
+
+                records.append(factors)
         except Exception:
             continue
 
-    return pd.DataFrame(records)
+        if (i + 1) % 200 == 0:
+            logger.info(f"  准备训练数据: {i+1}/{total} (已生成 {len(records)} 条)")
+
+    train_df = pd.DataFrame(records)
+    logger.info(f"  训练样本生成完成: {len(train_df)} 条 ({len(symbols)} 只股票)")
+    return train_df
 
 
 def train_model(train_df: pd.DataFrame) -> dict:

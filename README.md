@@ -43,6 +43,7 @@ python main.py deploy       # 生成今日操作清单
 | `python main.py train` | 训练XGBoost模型 |
 | `python main.py predict` | ML选股预测 |
 | `python main.py fetch` | 下载历史数据 |
+| `python main.py fetch-all [--limit N] [--refresh]` | 批量下载全A股票日线 |
 | `python main.py portfolio` | 查看持仓 |
 | `python main.py evolve [--push]` | 模型自动进化 |
 | `python main.py evolve-history` | 查看进化记录 |
@@ -54,15 +55,21 @@ pj_quant/
 ├── main.py                    # CLI 入口
 ├── setup.sh                   # 一键部署脚本
 ├── run_daily.sh               # 每日定时任务（crontab）
+├── run_pipeline.sh            # 一键流水线（数据→训练→部署）
 ├── run_monthly_evolve.sh      # 每月模型进化
 ├── requirements.txt           # Python 依赖
 │
 ├── config/
-│   └── settings.py            # 全局配置
+│   ├── settings.py            # 全局配置（含API密钥）
+│   └── settings.py.example    # 配置模板
 │
 ├── data/
 │   ├── fetcher.py             # 数据获取（东方财富/AKShare/BaoStock/腾讯/新浪）
-│   └── storage.py             # SQLite 存储 + 增量缓存
+│   ├── storage.py             # SQLite 存储管理
+│   ├── bulk_fetcher.py        # BaoStock 批量行情入库（4417只）
+│   ├── supplement_fundamentals.py  # BaoStock 估值补全（已弃用）
+│   ├── tushare_fundamentals.py     # Tushare 估值补全（当前方案）
+│   └── fundamentals_parquet/       # Parquet 缓存目录
 │
 ├── strategy/
 │   ├── base.py                # 策略基类
@@ -75,7 +82,8 @@ pj_quant/
 │
 ├── ml/
 │   ├── ranker.py              # XGBoost选股模型 + 版本管理
-│   └── auto_evolve.py         # 自动进化（训练+对比+替换）
+│   ├── auto_evolve.py         # 自动进化（训练+对比+替换）
+│   └── models/                # 模型文件目录
 │
 ├── sentiment/
 │   └── analyzer.py            # 双模型情绪分析（glm-4-flash + GLM-5）
@@ -91,6 +99,9 @@ pj_quant/
 │   ├── daily_runner.py        # 每日信号生成
 │   └── notify.py              # 微信推送（PushPlus）
 │
+├── scripts/
+│   └── validate_data.py       # 数据验证脚本
+│
 └── tests/
 ```
 
@@ -104,14 +115,20 @@ pj_quant/
 - **ETF信号** → 5只ETF动量轮动，含国债ETF防守
 - **个股精选** → 小盘多因子排名 ∩ ML预测排名，双重确认加分
 
-### 2. 数据获取 (data/fetcher.py)
+### 2. 数据获取 (data/)
 
-5级数据源自动降级，本地SQLite缓存：
+5级数据源自动降级，本地SQLite + Parquet缓存：
 1. 东方财富（最快）
 2. AKShare（最全）
 3. BaoStock（无限制）
-4. 腾讯API（实时行情）
-5. 新浪API（盘口数据）
+4. Tushare（基本面/估值，速度快，Parquet格式缓存）
+5. 腾讯API（实时行情）/ 新浪API（盘口数据）
+
+数据文件：
+- `data/fetcher.py` — 实时数据获取（东方财富/AKShare/BaoStock/腾讯/新浪）
+- `data/storage.py` — SQLite 存储管理
+- `data/bulk_fetcher.py` — BaoStock 批量行情入库（4417只股票日线）
+- `data/tushare_fundamentals.py` — Tushare 估值数据补全（Parquet → SQLite）
 
 ### 3. 情绪分析 (sentiment/analyzer.py)
 

@@ -312,7 +312,6 @@ def compute_stock_pool_factors(
     logger.info(f"开始计算情绪因子 ({len(df)} 只股票)...")
     df = _batch_sentiment_factors(df)
 
-    df = pd.DataFrame(all_factors)
     logger.info(f"因子计算完成: {len(df)} 只股票, {len(df.columns)} 个因子")
     return df
 
