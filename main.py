@@ -10,8 +10,13 @@ A股量化交易系统 - 主入口
   python main.py predict            # ML 模型预测选股
   python main.py fetch              # 下载 ETF 历史数据
   python main.py fetch-all [--limit N] [--refresh]  # 批量下载全市场股票日线
-  python main.py portfolio          # 查看持仓
+  python main.py portfolio          # 查看持仓（含实时盈亏）
+  python main.py portfolio --buy CODE --shares N --price X    # 记录买入
+  python main.py portfolio --sell CODE --price X              # 记录卖出
+  python main.py portfolio --cash AMOUNT                      # 修改可用资金
+  python main.py portfolio --reset                             # 重置为初始状态
   python main.py deploy [--push] [--simulate]  # 统一部署（生成今日操作清单）
+  python main.py live [--push] [--simulate]    # 激进实盘（100%个股，3只集中持仓）
   python main.py evolve [--push]    # 自动进化（训练+对比+替换+报告）
   python main.py evolve-history     # 查看进化记录
 """
@@ -263,6 +268,60 @@ def run_predict():
     print(f"{'='*50}")
 
 
+def run_portfolio():
+    """持仓管理: 查看/手动同步"""
+    from portfolio.tracker import PortfolioTracker
+    from portfolio.trade_utils import estimate_buy_cost, estimate_sell_cost
+
+    tracker = PortfolioTracker()
+
+    # 子命令
+    if "--reset" in sys.argv:
+        from config.settings import INITIAL_CAPITAL
+        tracker.state = {"cash": INITIAL_CAPITAL, "holdings": {}, "total_value": INITIAL_CAPITAL}
+        from data.storage import save_portfolio
+        save_portfolio(tracker.state)
+        print("持仓已重置为初始状态")
+        return
+
+    if "--cash" in sys.argv:
+        idx = sys.argv.index("--cash")
+        amount = float(sys.argv[idx + 1])
+        tracker.set_cash(amount)
+        print(f"可用资金已设为: {amount:,.2f} 元")
+        print(tracker.get_realtime_summary())
+        return
+
+    if "--buy" in sys.argv:
+        idx = sys.argv.index("--buy")
+        code = sys.argv[idx + 1]
+        shares = int(sys.argv[sys.argv.index("--shares") + 1])
+        price = float(sys.argv[sys.argv.index("--price") + 1])
+        cost = estimate_buy_cost(price * shares)
+        tracker.update_after_buy(code, shares, price, cost)
+        print(f"已记录买入: {code} {shares}股 @ {price:.2f} (手续费 {cost:.2f}元)")
+        print(tracker.get_realtime_summary())
+        return
+
+    if "--sell" in sys.argv:
+        idx = sys.argv.index("--sell")
+        code = sys.argv[idx + 1]
+        if code not in tracker.holdings:
+            print(f"错误: {code} 不在持仓中")
+            print(f"当前持仓: {', '.join(tracker.holdings.keys()) or '空仓'}")
+            return
+        price = float(sys.argv[sys.argv.index("--price") + 1])
+        shares = tracker.holdings[code]["shares"]
+        cost = estimate_sell_cost(price * shares)
+        tracker.update_after_sell(code, price, cost)
+        print(f"已记录卖出: {code} {shares}股 @ {price:.2f} (手续费 {cost:.2f}元)")
+        print(tracker.get_realtime_summary())
+        return
+
+    # 默认: 显示持仓
+    print(tracker.get_realtime_summary())
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -295,13 +354,17 @@ def main():
             _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
         bulk_fetch(limit=_limit, refresh=_refresh)
     elif command == "portfolio":
-        from alert.daily_runner import show_portfolio
-        show_portfolio()
+        run_portfolio()
     elif command == "deploy":
         from portfolio.allocator import run_deploy
         push = "--push" in sys.argv
         simulate = "--simulate" in sys.argv
         run_deploy(push=push, simulate=simulate)
+    elif command == "live":
+        from portfolio.allocator import run_live_deploy
+        push = "--push" in sys.argv
+        simulate = "--simulate" in sys.argv
+        run_live_deploy(push=push, simulate=simulate)
     elif command == "evolve":
         from ml.auto_evolve import evolve
         push = "--push" in sys.argv

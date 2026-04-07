@@ -262,6 +262,7 @@ def compute_stock_pool_factors(
     min_cap: float = 5e8,
     max_cap: float = 5e9,
     end_date: str = None,
+    skip_sentiment: bool = False,
 ) -> pd.DataFrame:
     """
     计算整个小市值股票池的因子矩阵
@@ -309,8 +310,12 @@ def compute_stock_pool_factors(
         return df
 
     # 情绪因子: 批量获取个股新闻标题，一次性让 flash 打标
-    logger.info(f"开始计算情绪因子 ({len(df)} 只股票)...")
-    df = _batch_sentiment_factors(df)
+    if skip_sentiment:
+        df["sentiment_score"] = np.nan
+        logger.info(f"跳过情绪因子计算")
+    else:
+        logger.info(f"开始计算情绪因子 ({len(df)} 只股票)...")
+        df = _batch_sentiment_factors(df)
 
     logger.info(f"因子计算完成: {len(df)} 只股票, {len(df.columns)} 个因子")
     return df

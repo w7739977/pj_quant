@@ -20,8 +20,8 @@ echo "========== $(date '+%Y-%m-%d %H:%M:%S') 每日统一部署开始 =========
 
 cd "${PROJECT_DIR}"
 
-# 统一部署: 市场情绪 + 资金分配 + ETF轮动 + 个股精选 + 微信推送 + 模拟执行
-python3 main.py deploy --push --simulate >> "${LOG_FILE}" 2>&1
+# 激进实盘部署: 持仓检查 + 选股 + 精确股数 + 微信推送 + 模拟执行
+python3 main.py live --push --simulate >> "${LOG_FILE}" 2>&1
 
 echo "========== $(date '+%Y-%m-%d %H:%M:%S') 每日统一部署完毕 ==========" >> "${LOG_FILE}"
 echo "" >> "${LOG_FILE}"

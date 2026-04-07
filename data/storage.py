@@ -96,8 +96,9 @@ def save_portfolio(state: dict):
     """保存持仓状态"""
     conn = get_connection()
     import json
-    state["holdings"] = json.dumps(state.get("holdings", {}), ensure_ascii=False)
-    pd.DataFrame([state]).to_sql("portfolio", conn, if_exists="replace", index=False)
+    save_state = dict(state)
+    save_state["holdings"] = json.dumps(state.get("holdings", {}), ensure_ascii=False)
+    pd.DataFrame([save_state]).to_sql("portfolio", conn, if_exists="replace", index=False)
     conn.close()
 
 

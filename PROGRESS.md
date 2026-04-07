@@ -1,5 +1,71 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-08 激进实盘部署
+
+### 模型训练完成
+
+**XGBoost 模型 (R²=0.0902):**
+- 训练样本: 96,246 条 (1,518 只股票)
+- 交叉验证 R²: 0.0902 ± 0.0119
+- 基本面因子修复生效: turnover_rate 排名 #2, pb 排名 #10
+- 并行训练: 4 chunk 并行数据准备 → 288,034 条样本 → 合并训练
+
+**Top 5 因子重要性:**
+1. mom_20d (0.1261)
+2. turnover_rate (0.1064)
+3. vol_10d (0.1019)
+4. ma10_bias (0.0853)
+5. avg_turnover_5d (0.0617)
+
+### 激进实盘策略
+
+**配置:**
+- 初始资金: 20,000 元
+- 持仓数量: 3 只集中持仓
+- 板块限制: 主板+创业板（排除科创板688/北交所8xx/4xx）
+- 止损/止盈: -8% / +15%
+- 最大持仓: 20 个交易日
+
+**新增文件:**
+- `portfolio/trade_utils.py` — 交易工具（板块过滤/股数计算/成本估算/清单格式化）
+- `train_parallel.sh` — 并行训练脚本
+- `ml/parallel_prepare.py` — 并行数据准备
+
+**修改文件:**
+- `portfolio/allocator.py` — 新增 `run_live_deploy()` 激进实盘部署
+  - simulate 模式: 先卖后买，用实际回笼资金选股，资金零偏差
+  - `check_holdings()` 止损/止盈/超时调仓检测
+  - `get_stock_picks_live()` 快速选股（跳过情绪因子，~40秒）
+- `portfolio/tracker.py` — 增强持仓管理
+  - `get_realtime_summary()` 实时盈亏
+  - 加仓均价自动合并
+  - 卖出验证（不存在的股票提示错误）
+- `main.py` — 新增 `live` 命令 + 增强 `portfolio` 命令
+- `config/settings.py` — 新增实盘参数
+- `factors/calculator.py` — `skip_sentiment` 参数，快速路径
+- `data/storage.py` — 修复 `save_portfolio` 原地修改 bug
+
+**命令用法:**
+```bash
+# 生成今日操作清单
+python main.py live
+
+# 推送到微信
+python main.py live --push
+
+# 推送 + 模拟执行（精确资金计算）
+python main.py live --push --simulate
+
+# 手动同步持仓
+python main.py portfolio --buy CODE --shares N --price X
+python main.py portfolio --sell CODE --price X
+python main.py portfolio --reset
+```
+
+---
+
+## 2026-04-07 Tushare 数据补全 + 模型训练
+
 ## 2026-04-07 晚间更新（Tushare 方案）
 
 ### 数据补全方案对比
@@ -36,9 +102,10 @@
 
 ### 待完成
 
-- [ ] XGBoost 模型训练（数据已就绪）
-- [ ] 首次 deploy 生成操作清单
-- [ ] Git commit + push 今日修改
+- [x] XGBoost 模型训练（R²=0.0902, 96246样本）
+- [x] 激进实盘部署 (`python main.py live`)
+- [x] 持仓管理 + 手动同步
+- [ ] 实盘跟踪验证（需观察1-2周信号准确度）
 
 ---
 

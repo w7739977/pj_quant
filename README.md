@@ -1,21 +1,19 @@
 # pj_quant - A股量化交易系统
 
-2万小资金 A 股量化实盘系统，整合 **ETF轮动 + 小盘多因子 + ML预测 + 情绪分析**。
+2万小资金 A 股量化实盘系统，整合 **小盘多因子 + ML预测 + 情绪分析**。
 
 ## 系统架构
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                  统一组合引擎 (deploy)                     │
-│                                                          │
-│  市场情绪 ──→ 动态资金分配 ──→ 信号生成 ──→ 操作清单      │
-│                                                          │
-│  偏多: ETF 30% | 个股 70%                                │
-│  中性: ETF 50% | 个股 50%                                │
-│  偏空: ETF 80%(含国债) | 个股 20%                         │
-│                                                          │
-│  个股 = 小盘多因子 ∩ ML预测 (交集加分)                    │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│              激进实盘引擎 (live)                       │
+│                                                      │
+│  持仓检查 ──→ 止损/止盈/超时 ──→ 卖出信号            │
+│  多因子+ML ──→ 板块过滤 ──→ 100股整手 ──→ 买入信号    │
+│                                                      │
+│  3只集中持仓 | 排除科创/北交所 | 精确到股数和金额      │
+│  止损-8% | 止盈+15% | 超时20日调仓                    │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## 快速开始
@@ -35,7 +33,12 @@ python main.py deploy       # 生成今日操作清单
 
 | 命令 | 说明 |
 |------|------|
-| `python main.py deploy [--push] [--simulate]` | **统一部署**：情绪+分配+选股+推送 |
+| `python main.py live [--push] [--simulate]` | **激进实盘**：持仓检查+选股+精确股数+推送 |
+| `python main.py portfolio` | 查看持仓（含实时盈亏） |
+| `python main.py portfolio --buy CODE --shares N --price X` | 记录买入 |
+| `python main.py portfolio --sell CODE --price X` | 记录卖出 |
+| `python main.py portfolio --reset` | 重置为初始状态 |
+| `python main.py deploy [--push] [--simulate]` | 标准部署（ETF+个股） |
 | `python main.py backtest` | ETF轮动策略回测 |
 | `python main.py signal [--push]` | ETF轮动信号 |
 | `python main.py smallcap` | 小盘多因子选股 |
@@ -44,7 +47,6 @@ python main.py deploy       # 生成今日操作清单
 | `python main.py predict` | ML选股预测 |
 | `python main.py fetch` | 下载历史数据 |
 | `python main.py fetch-all [--limit N] [--refresh]` | 批量下载全A股票日线 |
-| `python main.py portfolio` | 查看持仓 |
 | `python main.py evolve [--push]` | 模型自动进化 |
 | `python main.py evolve-history` | 查看进化记录 |
 
@@ -89,8 +91,9 @@ pj_quant/
 │   └── analyzer.py            # 双模型情绪分析（glm-4-flash + GLM-5）
 │
 ├── portfolio/
-│   ├── allocator.py           # 统一组合引擎
-│   └── tracker.py             # 持仓跟踪
+│   ├── allocator.py           # 统一组合引擎 + 激进实盘部署
+│   ├── tracker.py             # 持仓跟踪（实时盈亏/手动同步）
+│   └── trade_utils.py         # 交易工具（板块过滤/股数/成本）
 │
 ├── backtest/
 │   └── engine.py              # 回测引擎
@@ -107,13 +110,14 @@ pj_quant/
 
 ## 核心模块
 
-### 1. 统一组合引擎 (portfolio/allocator.py)
+### 1. 激进实盘引擎 (portfolio/allocator.py)
 
-整合三大策略，生成每日操作清单：
-- **市场情绪** → glm-4-flash快速标注 + GLM-5深度推理，加权融合
-- **资金分配** → 情绪驱动，激进偏多70%个股 / 防守偏空80%ETF
-- **ETF信号** → 5只ETF动量轮动，含国债ETF防守
-- **个股精选** → 小盘多因子排名 ∩ ML预测排名，双重确认加分
+每日操作清单生成，精确到股数和金额：
+- **持仓检查** → 批量实时行情，自动检测止损(-8%)/止盈(+15%)/超时调仓(>20日)
+- **板块过滤** → 排除科创板(688)、北交所(8xx/4xx)、B股
+- **选股** → 多因子打分 ∩ ML预测排名，双重确认加分
+- **精确下单** → 实时价格 + 100股整手 + 交易成本估算
+- **simulate模式** → 先卖后买，实际资金计算，零偏差
 
 ### 2. 数据获取 (data/)
 
