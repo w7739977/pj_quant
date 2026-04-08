@@ -347,13 +347,17 @@ def main():
     elif command == "fetch":
         fetch_data()
     elif command == "fetch-all":
-        from data.bulk_fetcher import bulk_fetch
         _limit = 0
-        _refresh = "--refresh" in sys.argv
         if "--limit" in sys.argv:
             idx = sys.argv.index("--limit")
             _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
-        bulk_fetch(limit=_limit, refresh=_refresh)
+        if "--tushare" in sys.argv:
+            from data.tushare_daily import run as tushare_daily_run
+            tushare_daily_run(limit=_limit)
+        else:
+            from data.bulk_fetcher import bulk_fetch
+            _refresh = "--refresh" in sys.argv
+            bulk_fetch(limit=_limit, refresh=_refresh)
     elif command == "portfolio":
         run_portfolio()
     elif command == "deploy":
