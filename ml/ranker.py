@@ -157,7 +157,27 @@ def train_model(train_df: pd.DataFrame) -> dict:
     n_splits = min(5, len(X) // 10)
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
-    # 训练（含正则化 + early stopping）
+    # CV 模型（无 early stopping）
+    cv_model = XGBRegressor(
+        n_estimators=500,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        verbosity=0,
+    )
+
+    # 时间序列交叉验证
+    cv_scores = cross_val_score(cv_model, X, y, cv=tscv, scoring="r2")
+
+    # 全量训练（用 early stopping）
+    split_idx = int(len(X) * 0.8)
+    X_train_full, X_val_full = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train_full, y_val_full = y.iloc[:split_idx], y.iloc[split_idx:]
+
     model = XGBRegressor(
         n_estimators=500,
         max_depth=4,
@@ -170,14 +190,6 @@ def train_model(train_df: pd.DataFrame) -> dict:
         verbosity=0,
         early_stopping_rounds=20,
     )
-
-    # 时间序列交叉验证
-    cv_scores = cross_val_score(model, X, y, cv=tscv, scoring="r2")
-
-    # 全量训练（用最后一个 fold 的验证集做 early stopping）
-    split_idx = int(len(X) * 0.8)
-    X_train_full, X_val_full = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train_full, y_val_full = y.iloc[:split_idx], y.iloc[split_idx:]
 
     model.fit(
         X_train_full, y_train_full,
