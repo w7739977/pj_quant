@@ -72,17 +72,17 @@ for etf in ['510300','510500','159915','513100','511010']:
 
 预期：每个 ETF 有 1000+ 条数据，最新日期接近今天。
 
-### 步骤 2：全 A 股日线数据（约 3-4 小时，BaoStock 批量拉取）
+### 步骤 2：全 A 股日线数据
+
+**当前方案：BaoStock（约 3-4 小时，逐只拉取）**
 
 ```bash
 python3 main.py fetch-all
+# 限量测试: python3 main.py fetch-all --limit 100
 ```
 
-如需限量测试：
-
-```bash
-python3 main.py fetch-all --limit 100
-```
+> ⚠️ BaoStock 逐只股票串行拉取，4400+ 只需要 3-4 小时。  
+> **TODO**：后续接入 Tushare 按日期批量获取 K 线，预计可缩短到 25 分钟。
 
 验证：
 
