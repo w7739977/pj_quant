@@ -5,6 +5,7 @@
   PUSHPLUS_TOKEN=your_token_here
   LLM_API_KEY=your_key_here
   BRAVE_API_KEY=your_key_here
+  WEB_TOKEN=your_web_token_here
 """
 
 import os
@@ -27,6 +28,12 @@ MIN_COMMISSION = 5.0
 STAMP_TAX_RATE = 0.001
 TRANSFER_FEE_RATE = 0.00001
 
+# ============ 实盘交易成本 ============
+LIVE_COMMISSION_RATE = 0.00025
+LIVE_MIN_COMMISSION = 5.0
+LIVE_STAMP_TAX_RATE = 0.001
+LIVE_TRANSFER_FEE_RATE = 0.00001
+
 # ============ 回测参数 ============
 INITIAL_CAPITAL = 20000.0
 BACKTEST_START = "2020-01-01"
@@ -35,6 +42,12 @@ BACKTEST_END = "2025-12-31"
 # ============ 策略参数 ============
 MOMENTUM_LOOKBACK_DAYS = 20
 REBALANCE_DAYS = 40
+NUM_POSITIONS = 5
+
+# ============ 止损止盈参数 ============
+STOP_LOSS_PCT = -0.08
+TAKE_PROFIT_PCT = 0.15
+MAX_HOLDING_DAYS = 20
 
 # ============ PushPlus 微信推送 ============
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
