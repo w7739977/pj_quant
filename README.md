@@ -69,7 +69,6 @@ pj_quant/
 │   ├── fetcher.py             # 数据获取（东方财富/AKShare/BaoStock/腾讯/新浪）
 │   ├── storage.py             # SQLite 存储管理
 │   ├── bulk_fetcher.py        # BaoStock 批量行情入库（4417只）
-│   ├── supplement_fundamentals.py  # BaoStock 估值补全（已弃用）
 │   ├── tushare_fundamentals.py     # Tushare 估值补全（当前方案）
 │   └── fundamentals_parquet/       # Parquet 缓存目录
 │

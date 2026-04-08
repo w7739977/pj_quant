@@ -17,11 +17,10 @@
 
 ### 1.2 优化方案
 
-**新增文件: `data/tushare_loader.py`**
-- 统一 Tushare K线 + 基本面获取
-- 按日期批量 (0.3s/日期, 全市场5000+只)
+**优化方向（已清理，功能由 `data/tushare_fundamentals.py` 承担）：**
+- 按日期批量获取 (0.3s/日期, 全市场5000+只)
 - Parquet 缓存 → SQLite 批量导入
-- 内置验证函数 `verify_import()`
+- 内置验证函数 `_verify_import()`
 
 **优势对比:**
 | 指标 | BaoStock | Tushare |
@@ -49,7 +48,7 @@ return len(updated_stocks)
 - 数据类型转换错误
 - 日期匹配错误
 
-### 2.2 修复方案 (已集成)
+### 2.2 修复方案（ranker.py 基本面因子已修复，其余优化方案已移除待后续重新实现）
 
 **新增函数 `_verify_import()`**:
 ```
@@ -158,26 +157,24 @@ factors 字典 → 训练样本
 
 ---
 
-## 四、优化后文件清单
-
-| 新文件 | 用途 |
-|--------|------|
-| `data/tushare_loader.py` | 统一 Tushare 数据获取 (K线+基本面) |
-| `ml/ranker_optimized.py` | 优化的训练模块 (时间序列CV+正则化) |
+## 四、已完成的修改
 
 | 修改文件 | 变更 |
 |----------|------|
 | `data/tushare_fundamentals.py` | 新增 `_verify_import()` 验证函数 |
 | `ml/ranker.py` | 修复基本面因子 NaN bug |
 
+> 注：原提议的 `data/tushare_loader.py`、`data/unified_loader.py`、`ml/ranker_optimized.py` 已清理移除。
+> 时间序列 CV + 正则化已直接集成到 `ml/ranker.py` 中。
+
 ---
 
 ## 五、建议执行顺序
 
-1. **立即修复**: `ml/ranker.py` 基本面因子 bug
+1. ~~**立即修复**: `ml/ranker.py` 基本面因子 bug~~ ✅ 已完成
 2. **测试验证**: 运行 `tushare_fundamentals.run()` 检查验证输出
-3. **可选升级**: 使用 `ranker_optimized.py` 替换训练逻辑
-4. **数据迁移**: 逐步用 `tushare_loader` 替换 BaoStock
+3. ~~**可选升级**: 使用 `ranker_optimized.py` 替换训练逻辑~~ → 已集成到 ranker.py
+4. **数据迁移**: 逐步用 Tushare 替换 BaoStock（可继续使用现有 tushare_fundamentals.py）
 
 ---
 

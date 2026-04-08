@@ -23,16 +23,13 @@
 
 | # | 问题 | 本地优先解决方案 | 收益 |
 |---|------|-----------------|------|
-| 1 | 数据源混乱 | `unified_loader.py`: SQLite → Parquet → Tushare | 统一入口，减少90%网络请求 |
+| 1 | 数据源混乱 | `data/fetcher.py` + `data/storage.py`: 本地优先读取 | 统一入口，减少90%网络请求 |
 | 2 | 入库无验证 | `_verify_import()`: Parquet ↔ SQLite 对比 | 及时发现数据错误 |
 | 3 | 基本面因子NaN | `ranker.py`: `window.iloc[-1]` 读取本地值 | 模型使用完整20因子 |
 
 ## 关键变更
 
 **新增文件**:
-- `data/unified_loader.py` — 统一数据入口，本地优先
-- `data/tushare_loader.py` — Tushare批量获取+Parquet缓存
-- `ml/ranker_optimized.py` — 优化训练模块（时间序列CV+正则化）
 - `CODE_REVIEW.md` — 本次审查文档
 
 **修改文件**:
@@ -41,7 +38,6 @@
 
 ## 验证检查清单
 
-- [ ] `unified_loader.get_stock_data()` 能正确读取本地数据
 - [ ] 入库后 `verify_import()` 输出全 ✓
 - [ ] 训练时基本面因子非NaN
 - [ ] 特征重要性中 pe_ttm/pb > 0

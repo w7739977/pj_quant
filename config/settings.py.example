@@ -1,6 +1,13 @@
 """
 项目配置文件
+
+密钥通过环境变量读取，请在项目根目录创建 .env 文件：
+  PUSHPLUS_TOKEN=your_token_here
+  LLM_API_KEY=your_key_here
+  BRAVE_API_KEY=your_key_here
 """
+
+import os
 
 # ============ 数据库 ============
 DB_PATH = "data/quant.db"
@@ -30,19 +37,19 @@ MOMENTUM_LOOKBACK_DAYS = 20
 REBALANCE_DAYS = 40
 
 # ============ PushPlus 微信推送 ============
-PUSHPLUS_TOKEN = "YOUR_PUSHPLUS_TOKEN"
+PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 
 # ============ 定时任务 ============
 SIGNAL_RUN_HOUR = 15
 SIGNAL_RUN_MINUTE = 30
 
 # ============ 智谱 GLM LLM 配置 ============
-LLM_API_KEY = "YOUR_GLM_API_KEY"
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 LLM_MODEL = "glm-4-flash"
 
 # ============ Brave Search API ============
-BRAVE_API_KEY = "YOUR_BRAVE_API_KEY"
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 BRAVE_BASE_URL = "https://api.search.brave.com/res/v1/web/search"
 
 # ============ 成长路线图 ============
