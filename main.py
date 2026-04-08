@@ -19,6 +19,7 @@ A股量化交易系统 - 主入口
   python main.py live [--push] [--simulate]    # 激进实盘（100%个股，3只集中持仓）
   python main.py evolve [--push]    # 自动进化（训练+对比+替换+报告）
   python main.py evolve-history     # 查看进化记录
+  python main.py performance [--push]  # 信号绩效追踪报告
 """
 
 import sys
@@ -386,6 +387,10 @@ def main():
                 print(f"    决策: {dec}")
                 print(f"    新R²={training.get('new_r2', 'N/A')} | 旧R²={training.get('old_r2', 'N/A')} | 样本={training.get('train_samples', 'N/A')}")
                 print()
+    elif command == "performance":
+        from scripts.track_performance import run as run_perf
+        push = "--push" in sys.argv
+        run_perf(push=push)
     else:
         print(f"未知命令: {command}")
         print(__doc__)
