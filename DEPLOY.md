@@ -74,32 +74,38 @@ for etf in ['510300','510500','159915','513100','511010']:
 
 ### 步骤 2：全 A 股日线数据
 
-**推荐方案：Tushare（约 10-25 分钟，按日期批量）**
+**推荐方案：Tushare（约 30-50 分钟，K线 + 基本面一键完成）**
 
 ```bash
 python3 main.py fetch-all --tushare
 # 限量测试: python3 main.py fetch-all --tushare --limit 10
 ```
 
-**备选方案：BaoStock（约 3-4 小时，逐只拉取）**
+> 该命令自动完成 K 线下载 + 基本面补全（pe_ttm, pb, turnover_rate, volume_ratio）。
+
+**备选方案：BaoStock + 手动补全基本面（约 4-5 小时）**
 
 ```bash
 python3 main.py fetch-all
-# 限量测试: python3 main.py fetch-all --limit 100
+python3 -c "from data.tushare_fundamentals import run; run()"
 ```
 
-验证：
+验证（K 线 + 基本面都要检查）：
 
 ```bash
 python3 -c "
-from data.storage import list_cached_stocks
+from data.storage import list_cached_stocks, load_stock_daily
 stocks = list_cached_stocks()
-print(f'已缓存: {len(stocks)} 只股票')"
+print(f'已缓存: {len(stocks)} 只股票')
+df = load_stock_daily('000001')
+for c in ['pe_ttm','pb','turnover_rate','volume_ratio']:
+    print(f'  {c}: {df[c].notna().mean():.0%}')
+"
 ```
 
-预期：约 4400+ 只股票。
+预期：4400+ 只股票，pe_ttm > 80%，其余 > 99%。**如果基本面全为 0%，模型训练会过拟合（R² 虚高到 0.9+）。**
 
-### 步骤 3：基本面数据补全（约 25 分钟，需 Tushare token）
+### 步骤 3：基本面数据补全（仅 BaoStock 方案需要单独执行）
 
 ```bash
 python3 -c "from data.tushare_fundamentals import run; run()"

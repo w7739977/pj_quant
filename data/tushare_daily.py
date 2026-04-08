@@ -204,8 +204,17 @@ def run(limit=0):
     print(f"\n[3/3] 导入 SQLite...")
     count = import_to_sqlite(limit=limit)
 
+    # Step 4: 自动补全基本面数据
+    print(f"\n[4/4] 补全基本面数据 (pe_ttm, pb, turnover_rate, volume_ratio)...")
+    try:
+        from data.tushare_fundamentals import run as run_fundamentals
+        run_fundamentals(limit=limit)
+    except Exception as e:
+        print(f"  ⚠️ 基本面补全失败: {e}")
+        print(f"  请手动执行: python3 -c \"from data.tushare_fundamentals import run; run()\"")
+
     print(f"\n{'='*60}")
-    print(f"完成! 共入库 {count} 只股票的日线数据")
+    print(f"完成! 共入库 {count} 只股票 (K线 + 基本面)")
     print(f"{'='*60}")
 
 
