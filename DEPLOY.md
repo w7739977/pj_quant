@@ -83,6 +83,20 @@ python3 main.py fetch-all --tushare
 
 > 该命令自动完成 K 线下载 + 基本面补全（pe_ttm, pb, turnover_rate, volume_ratio）。
 
+**每日增量更新（部署完成后的日常流程）**
+
+`run_daily.sh` 已自动在 preflight 之前调用增量拉取。手动触发：
+
+```bash
+python3 main.py fetch-all --tushare --incremental
+```
+
+- 增量模式只补齐 SQLite 最新日期之后的新交易日，约 1 秒/天
+- 自动链式补齐基本面数据（pe_ttm/pb/turnover_rate/volume_ratio），无需单独执行
+- 不会 DROP 表，不会抹掉基本面列
+- 重复执行幂等（已最新则打印「无需更新」）
+- 首次部署仍需全量：`python3 main.py fetch-all --tushare`（不加 `--incremental`）
+
 **备选方案：BaoStock + 手动补全基本面（约 4-5 小时）**
 
 ```bash
@@ -362,7 +376,7 @@ crontab -l
 
 **每日自动流程（无需人工干预）：**
 
-15:30 cron → preflight 检查 → live --push → postflight 归档 → 你收到微信推送的操作建议。
+15:30 cron → 增量数据拉取 → preflight 检查 → live --push → postflight 归档 → 你收到微信推送的操作建议。
 
 **你的操作流程：**
 
@@ -438,6 +452,8 @@ send_message('测试', '部署验证', PUSHPLUS_TOKEN)"
 |------|------|
 | `python3 main.py fetch` | ETF 数据 |
 | `python3 main.py fetch-all` | 全 A 股日线 |
+| `python3 main.py fetch-all --tushare` | Tushare 全量 (K线+基本面) |
+| `python3 main.py fetch-all --tushare --incremental` | Tushare 增量 (仅补新日期) |
 | `python3 main.py fetch-all --limit 100` | 限量测试 |
 
 **策略：**

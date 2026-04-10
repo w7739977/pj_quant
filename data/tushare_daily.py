@@ -22,6 +22,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -183,10 +184,144 @@ def import_to_sqlite(limit=0):
     return len(written_tables)
 
 
-def run(limit=0):
-    """一键运行: 下载日线数据 → 导入 SQLite"""
+def get_last_trade_date_in_db(db_path=DB_PATH) -> Optional[str]:
+    """
+    查询 SQLite 中所有 stock_* 表的最大日期，返回全局最新日期。
+
+    随机抽样 10 只股票取 MAX(date)，避免全表扫描。
+
+    Returns
+    -------
+    str | None
+        YYYYMMDD 格式字符串（如 "20260407"），空库返回 None
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+            ).fetchall()
+        ]
+        if not tables:
+            return None
+
+        # 随机抽样 10 只取 MAX(date)
+        import random
+        sample = random.sample(tables, min(10, len(tables)))
+
+        max_date = None
+        for table in sample:
+            try:
+                row = conn.execute(f"SELECT MAX(date) FROM {table}").fetchone()
+                if row and row[0]:
+                    d = str(row[0])[:10].replace("-", "")
+                    if max_date is None or d > max_date:
+                        max_date = d
+            except Exception:
+                continue
+
+        return max_date
+    finally:
+        conn.close()
+
+
+def import_to_sqlite_incremental(new_dates: list) -> int:
+    """
+    增量导入: 只读取 new_dates 对应的 Parquet 文件，追加到 SQLite。
+
+    不会 DROP 任何表。对已有表用 DELETE 去重后再 append。
+
+    Parameters
+    ----------
+    new_dates : list[str]
+        需要导入的日期列表，YYYYMMDD 格式 (如 ["20260408"])
+
+    Returns
+    -------
+    int
+        更新的股票数量
+    """
+    # 只读取 new_dates 对应的 Parquet
+    parquet_files = [f"{d}.parquet" for d in new_dates]
+    parquet_files = [f for f in parquet_files if os.path.exists(os.path.join(PARQUET_DIR, f))]
+
+    if not parquet_files:
+        print("  没有新的 Parquet 文件需要导入")
+        return 0
+
+    print(f"  增量导入 {len(parquet_files)} 个日期文件...")
+
+    conn = sqlite3.connect(DB_PATH)
+
+    # 去重: 删除已有表中 >= 最早新日期的数据
+    min_date_yyyymmdd = min(new_dates)
+    min_date_str = f"{min_date_yyyymmdd[:4]}-{min_date_yyyymmdd[4:6]}-{min_date_yyyymmdd[6:8]}"
+
+    existing_tables = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+        ).fetchall()
+    }
+
+    # 用 _process_parquet_batch 处理，但禁止 replace
+    dfs = []
+    for fname in parquet_files:
+        fpath = os.path.join(PARQUET_DIR, fname)
+        dfs.append(pd.read_parquet(fpath))
+
+    if not dfs:
+        conn.close()
+        return 0
+
+    batch_df = pd.concat(dfs, ignore_index=True)
+    batch_df["code"] = batch_df["ts_code"].str.split(".").str[0]
+
+    col_map = {"vol": "volume", "amount": "turnover"}
+    batch_df = batch_df.rename(columns=col_map)
+    batch_df["date"] = pd.to_datetime(batch_df["trade_date"], format="%Y%m%d")
+
+    # 排除科创板
+    batch_df = batch_df[~batch_df["code"].str.startswith("688")]
+
+    final_cols = ["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"]
+    for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
+        batch_df[c] = pd.to_numeric(batch_df[c], errors="coerce")
+
+    written = 0
+    for code, group in batch_df.groupby("code"):
+        table = f"stock_{code}"
+        stock_df = group[[c for c in final_cols if c in group.columns]].sort_values("date").reset_index(drop=True)
+
+        if table in existing_tables:
+            # 已有表: 先删除重复日期，再追加
+            conn.execute(f"DELETE FROM {table} WHERE date >= ?", (min_date_str,))
+            stock_df.to_sql(table, conn, if_exists="append", index=False)
+        else:
+            # 新表(IPO新股): 直接创建
+            stock_df.to_sql(table, conn, if_exists="replace", index=False)
+            existing_tables.add(table)
+        written += 1
+
+    conn.commit()
+    conn.close()
+    print(f"  增量入库完成: {written} 只股票")
+    return written
+
+
+def run(limit=0, incremental=False):
+    """
+    一键运行: 下载日线数据 → 导入 SQLite
+
+    Parameters
+    ----------
+    limit : int
+        限制处理的交易日数量，0 表示全部
+    incremental : bool
+        True = 增量模式（只补齐新交易日），False = 全量模式（从 2020-01-01 重建）
+    """
+    mode_str = "增量更新" if incremental else "全量获取"
     print("=" * 60)
-    print("Tushare 全市场日线数据获取")
+    print(f"Tushare 全市场日线数据 — {mode_str}")
     print("=" * 60)
 
     pro = _init_tushare()
@@ -196,6 +331,45 @@ def run(limit=0):
     dates = fetch_trading_calendar(pro)
     print(f"  {len(dates)} 个交易日 ({dates[0]} ~ {dates[-1]})")
 
+    if incremental:
+        # 增量模式: 只补齐 DB 最新日期之后的交易日
+        last_date = get_last_trade_date_in_db()
+        if last_date is None:
+            print("  ⚠️ 本地无数据，自动切换为全量模式")
+            incremental = False
+        else:
+            new_dates = [d for d in dates if d > last_date]
+            if not new_dates:
+                print(f"  已是最新 (DB最新: {last_date})，无需更新")
+                print(f"\n{'='*60}")
+                print(f"增量检查完成: 无新交易日")
+                print(f"{'='*60}")
+                return
+            print(f"  增量模式: 从 {last_date} 之后补齐 {len(new_dates)} 个交易日")
+
+            # Step 2: 下载新日期
+            print(f"\n[2/4] 下载 {len(new_dates)} 个新交易日...")
+            fetch_daily_by_date(pro, new_dates, limit=limit or 0)
+
+            # Step 3: 增量导入 K 线
+            print(f"\n[3/4] 增量导入 SQLite...")
+            count = import_to_sqlite_incremental(new_dates)
+
+            # Step 4: 链式补全基本面
+            print(f"\n[4/4] 增量补全基本面数据...")
+            try:
+                from data.tushare_fundamentals import run as run_fundamentals
+                run_fundamentals(incremental=True)
+            except Exception as e:
+                print(f"  ⚠️ 基本面增量补全失败: {e}")
+                print(f"  可手动执行: python3 -c \"from data.tushare_fundamentals import run; run(incremental=True)\"")
+
+            print(f"\n{'='*60}")
+            print(f"增量更新完成! 补齐 {len(new_dates)} 个交易日, {count} 只股票")
+            print(f"{'='*60}")
+            return
+
+    # 全量模式（原流程）
     # Step 2: 按日期下载
     print(f"\n[2/3] 按日期批量下载日线数据...")
     fetch_daily_by_date(pro, dates, limit=limit)

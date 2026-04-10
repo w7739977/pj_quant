@@ -20,6 +20,20 @@ LOG_FILE="$LOG_DIR/daily_${DATE}.log"
 
 echo "========== $DATE 日常执行 ==========" | tee -a "$LOG_FILE"
 
+# 阶段零：增量数据拉取（preflight 之前，保证数据新鲜）
+echo "[$(date +%H:%M:%S)] 增量数据拉取..." | tee -a "$LOG_FILE"
+if python3 main.py fetch-all --tushare --incremental 2>&1 | tee -a "$LOG_FILE"; then
+    echo "[$(date +%H:%M:%S)] 数据拉取完成" | tee -a "$LOG_FILE"
+else
+    echo "[$(date +%H:%M:%S)] 增量数据拉取失败，推送告警" | tee -a "$LOG_FILE"
+    python3 -c "
+from alert.notify import send_message
+from config.settings import PUSHPLUS_TOKEN
+send_message('⚠️  增量数据拉取失败', '$(date) Tushare 增量更新失败，请排查。详见 $LOG_FILE', PUSHPLUS_TOKEN)
+" 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+
 # 阶段一：preflight 健康检查
 echo "[$(date +%H:%M:%S)] 开始 preflight 检查..." | tee -a "$LOG_FILE"
 if python3 scripts/preflight.py 2>&1 | tee -a "$LOG_FILE"; then

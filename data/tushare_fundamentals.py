@@ -19,9 +19,11 @@ import os
 import time
 import logging
 import sqlite3
+import random
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -110,13 +112,75 @@ def _ts_code_to_local(ts_code):
     return ts_code.split(".")[0]
 
 
-def import_to_sqlite(limit=0):
-    """从 Parquet 文件导入到 SQLite — 按股票批量 UPDATE"""
-    parquet_files = sorted(
-        f for f in os.listdir(PARQUET_DIR) if f.endswith(".parquet")
-    )
-    if limit > 0:
-        parquet_files = parquet_files[:limit]
+def get_last_fundamental_date_in_db(db_path=DB_PATH) -> Optional[str]:
+    """
+    查询 SQLite 中基本面最新日期（pe_ttm 非空）。
+
+    优先从高流动性锚点股查询，锚点不可用时回退随机抽样。
+
+    Returns
+    -------
+    str | None
+        YYYYMMDD 格式（如 "20260407"），无基本面数据返回 None
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        # 锚点股（高流动性，pe_ttm 覆盖率高）
+        anchors = ["stock_000001", "stock_600519", "stock_600036", "stock_000858"]
+        existing = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+            ).fetchall()
+        }
+
+        tables_to_check = [t for t in anchors if t in existing]
+        if not tables_to_check:
+            # 回退: 随机抽 10 只
+            all_stocks = list(existing)
+            if not all_stocks:
+                return None
+            tables_to_check = random.sample(all_stocks, min(10, len(all_stocks)))
+
+        max_date = None
+        for table in tables_to_check:
+            try:
+                row = conn.execute(
+                    f"SELECT MAX(date) FROM {table} WHERE pe_ttm IS NOT NULL"
+                ).fetchone()
+                if row and row[0]:
+                    d = str(row[0])[:10].replace("-", "")
+                    if max_date is None or d > max_date:
+                        max_date = d
+            except Exception:
+                continue
+
+        return max_date
+    finally:
+        conn.close()
+
+
+def import_to_sqlite(limit=0, only_dates=None):
+    """
+    从 Parquet 文件导入到 SQLite — 按股票批量 UPDATE
+
+    Parameters
+    ----------
+    limit : int
+        限制处理的 Parquet 文件数，0 表示全部
+    only_dates : list[str] | None
+        增量模式：只处理指定日期（YYYYMMDD）的 Parquet。
+        None 时处理全部（全量模式）。
+    """
+    if only_dates is not None:
+        parquet_files = [f"{d}.parquet" for d in only_dates]
+        parquet_files = [f for f in parquet_files
+                         if os.path.exists(os.path.join(PARQUET_DIR, f))]
+    else:
+        parquet_files = sorted(
+            f for f in os.listdir(PARQUET_DIR) if f.endswith(".parquet")
+        )
+        if limit > 0:
+            parquet_files = parquet_files[:limit]
 
     if not parquet_files:
         print("没有 Parquet 文件需要导入")
@@ -197,8 +261,10 @@ def import_to_sqlite(limit=0):
     elapsed = time.time() - t0
 
     # ===== 验证入库结果 =====
-    print("\n  验证入库结果...")
-    _verify_import()
+    # 增量模式跳过验证（数据量小），全量模式保留
+    if only_dates is None:
+        print("\n  验证入库结果...")
+        _verify_import()
 
     print(f"\n入库完成: {len(updated_stocks)} 只股票已更新, 耗时={elapsed/60:.1f}min")
     return len(updated_stocks)
@@ -251,10 +317,21 @@ def _verify_import(sample_date=None):
     conn.close()
 
 
-def run(limit=0):
-    """一键运行: 下载 Parquet → 导入 SQLite"""
+def run(limit=0, incremental=False):
+    """
+    一键运行: 下载 Parquet → 导入 SQLite
+
+    Parameters
+    ----------
+    limit : int
+        限制处理的交易日数量，0 表示全部
+    incremental : bool
+        True = 增量模式（只补齐基本面最新日期之后的新交易日），
+        False = 全量模式
+    """
+    mode_str = "增量更新" if incremental else "全量获取"
     print("=" * 60)
-    print("Tushare 估值数据补全")
+    print(f"Tushare 估值数据补全 — {mode_str}")
     print("=" * 60)
 
     pro = _init_tushare()
@@ -264,6 +341,35 @@ def run(limit=0):
     dates = fetch_trading_calendar(pro)
     print(f"  {len(dates)} 个交易日 ({dates[0]} ~ {dates[-1]})")
 
+    if incremental:
+        last_fund_date = get_last_fundamental_date_in_db()
+        if last_fund_date is None:
+            print("  ⚠️ 本地无基本面数据，自动切换为全量模式")
+            incremental = False
+        else:
+            new_dates = [d for d in dates if d > last_fund_date]
+            if not new_dates:
+                print(f"  基本面已是最新 (最新: {last_fund_date})")
+                print(f"\n{'='*60}")
+                print(f"基本面增量检查完成: 无需更新")
+                print(f"{'='*60}")
+                return
+            print(f"  基本面增量: 从 {last_fund_date} 之后补齐 {len(new_dates)} 个交易日")
+
+            # Step 2: 下载新日期
+            print(f"\n[2/3] 下载 {len(new_dates)} 个新交易日基本面数据...")
+            fetch_by_date(pro, new_dates, limit=0)
+
+            # Step 3: 增量导入
+            print(f"\n[3/3] 增量导入 SQLite...")
+            count = import_to_sqlite(only_dates=new_dates)
+
+            print(f"\n{'='*60}")
+            print(f"基本面增量完成! 补齐 {len(new_dates)} 个交易日, {count} 只股票")
+            print(f"{'='*60}")
+            return
+
+    # 全量模式（原流程）
     # Step 2: 按日期下载
     print(f"\n[2/3] 按日期批量下载基本面数据...")
     fetch_by_date(pro, dates, limit=limit)
