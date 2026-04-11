@@ -116,16 +116,25 @@ def check_data_accuracy() -> dict:
 
 
 def check_data_completeness() -> dict:
-    """检查3: 数据完整性（关键字段非空率）"""
+    """
+    检查3: 数据完整性（关键字段行级非空率）
+
+    - 按行聚合（非股均值），避免少数全 NaN 股票拉偏
+    - pe_ttm 天然 ~68%（亏损股无 PE，Tushare 返回空），阈值 50%
+    - pb / turnover_rate 天然 ~97-100%，阈值 80%
+    """
     from data.storage import list_cached_stocks, load_stock_daily
 
     stocks = list_cached_stocks()
     if not stocks:
         return {"pass": False, "msg": "无缓存股票数据"}
 
-    sample = random.sample(stocks, min(20, len(stocks)))
+    sample = random.sample(stocks, min(50, len(stocks)))
     check_cols = ["pe_ttm", "pb", "turnover_rate"]
-    col_rates = {c: [] for c in check_cols}
+    thresholds = {"pe_ttm": 0.50, "pb": 0.80, "turnover_rate": 0.80}
+
+    total_rows = {c: 0 for c in check_cols}
+    non_null = {c: 0 for c in check_cols}
 
     for sym in sample:
         try:
@@ -135,26 +144,28 @@ def check_data_completeness() -> dict:
             recent = df.tail(60)
             for col in check_cols:
                 if col in recent.columns:
-                    rate = recent[col].notna().mean()
-                    col_rates[col].append(rate)
+                    total_rows[col] += len(recent)
+                    non_null[col] += int(recent[col].notna().sum())
         except Exception:
             continue
 
-    if not any(col_rates.values()):
+    if sum(total_rows.values()) == 0:
         return {"pass": False, "msg": "无有效数据样本"}
 
-    avg_rates = {}
-    for col, rates in col_rates.items():
-        if rates:
-            avg_rates[col] = sum(rates) / len(rates)
-        else:
-            avg_rates[col] = 0.0
+    rates = {
+        c: (non_null[c] / total_rows[c]) if total_rows[c] > 0 else 0.0
+        for c in check_cols
+    }
 
-    failed = [f"{col} 非空率 {rate:.0%}" for col, rate in avg_rates.items() if rate < 0.8]
+    failed = [
+        f"{c} {rates[c]:.0%} (<{thresholds[c]:.0%})"
+        for c in check_cols
+        if rates[c] < thresholds[c]
+    ]
     if failed:
-        return {"pass": False, "msg": f"{', '.join(failed)} < 80%"}
+        return {"pass": False, "msg": ", ".join(failed)}
 
-    rates_str = ", ".join(f"{col} {rate:.0%}" for col, rate in avg_rates.items())
+    rates_str = ", ".join(f"{c} {rates[c]:.0%}" for c in check_cols)
     return {"pass": True, "msg": f"关键字段非空率: {rates_str}"}
 
 
