@@ -56,78 +56,13 @@ def fetch_eastmoney_news() -> list:
         return []
 
 
-def fetch_brave_news(query: str = "A股 股市 今日", count: int = 15) -> list:
-    """
-    通过 Brave Search API 搜索财经新闻
-
-    优势: 覆盖全网（财联社、同花顺、新浪、证券时报等），东方财富之外的补充视角
-    """
-    try:
-        from config.settings import BRAVE_API_KEY, BRAVE_BASE_URL
-    except ImportError:
-        return []
-
-    if not BRAVE_API_KEY:
-        return []
-
-    try:
-        headers = {
-            "X-Subscription-Token": BRAVE_API_KEY,
-            "Accept": "application/json",
-        }
-        params = {
-            "q": query,
-            "count": count,
-            "search_lang": "zh-hans",
-            "freshness": "pd",   # 过去24小时
-            "result_filter": "news",
-        }
-        resp = requests.get(BRAVE_BASE_URL, headers=headers, params=params, timeout=10)
-        data = resp.json()
-
-        news = []
-        results = data.get("news", {}).get("results", [])
-        if not results:
-            # 有时结果在 web key 下
-            results = data.get("web", {}).get("results", [])
-
-        for item in results:
-            title = item.get("title", "").strip()
-            if title and len(title) > 5:
-                news.append({
-                    "title": title,
-                    "content": item.get("description", ""),
-                    "source": "brave:" + item.get("url", "")[:30],
-                })
-        return news[:count]
-    except Exception as e:
-        logger.warning(f"Brave Search 新闻获取失败: {e}")
-        return []
-
-
-def fetch_brave_stock_news(symbol: str, name: str = "", count: int = 10) -> list:
-    """通过 Brave Search 搜索个股相关新闻"""
-    query = f"{name} {symbol} 股票 最新消息" if name else f"{symbol} 股票 最新消息"
-    return fetch_brave_news(query, count)
-
-
 def fetch_all_news() -> list:
     """
-    聚合多源新闻: 东方财富 + Brave Search
+    东方财富新闻聚合
 
     去重（标题相似度），优先保留有内容的条目
     """
-    all_news = []
-
-    # 东方财富（国内主流财经门户）
-    em_news = fetch_eastmoney_news()
-    all_news.extend(em_news)
-
-    # Brave Search（全网覆盖，补充视角）
-    brave_news = fetch_brave_news("A股 股市 今日 利好 利空", count=15)
-    if not brave_news:
-        brave_news = fetch_brave_news("A股 今日", count=15)
-    all_news.extend(brave_news)
+    all_news = fetch_eastmoney_news()
 
     # 去重: 标题前10字符相同的只保留一条
     seen = set()
@@ -403,15 +338,8 @@ def analyze_market_sentiment() -> dict:
 
 
 def analyze_stock_sentiment(symbol: str, name: str = "") -> dict:
-    """分析个股情绪（东财 + Brave 双源）"""
+    """分析个股情绪（东方财富新闻源）"""
     news = fetch_stock_news(symbol)
-    # Brave 补充
-    brave = fetch_brave_stock_news(symbol, name)
-    if brave:
-        existing_titles = {n["title"][:10] for n in news}
-        for n in brave:
-            if n["title"][:10] not in existing_titles:
-                news.append(n)
 
     if not news:
         return {"code": symbol, "score": 0, "news_count": 0, "sources": "none"}

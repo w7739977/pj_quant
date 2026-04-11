@@ -34,7 +34,6 @@ pip install -r requirements.txt
 ```env
 PUSHPLUS_TOKEN=你的PushPlus微信推送token
 LLM_API_KEY=你的智谱GLM API Key
-BRAVE_API_KEY=你的Brave Search API Key
 WEB_TOKEN=你的Web服务访问token（自定义，用于手机访问鉴权）
 ```
 

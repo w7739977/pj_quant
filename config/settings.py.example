@@ -4,7 +4,6 @@
 密钥通过环境变量读取，请在项目根目录创建 .env 文件：
   PUSHPLUS_TOKEN=your_token_here
   LLM_API_KEY=your_key_here
-  BRAVE_API_KEY=your_key_here
   WEB_TOKEN=your_web_token_here
 """
 
@@ -61,8 +60,7 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 LLM_MODEL = "glm-4-flash"
 
-# ============ Brave Search API ============
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
+# ============ Brave Search API（已移除） ============
 BRAVE_BASE_URL = "https://api.search.brave.com/res/v1/web/search"
 
 # ============ 成长路线图 ============

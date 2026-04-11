@@ -300,22 +300,28 @@ def fetch_daily_akshare(symbol: str, start_date: str, end_date: str) -> pd.DataF
 def fetch_daily_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """BaoStock 获取日线 (无频率限制，适合批量回填)"""
     import baostock as bs
+    import contextlib
+    import io
 
-    lg = bs.login()
+    with contextlib.redirect_stdout(io.StringIO()):
+        lg = bs.login()
     if lg.error_code != "0":
         raise ConnectionError(f"Baostock login failed: {lg.error_msg}")
 
-    bs_code = _code_to_prefix(symbol)
-    rs = bs.query_history_k_data_plus(
-        bs_code,
-        "date,open,high,low,close,volume,turn,pctChg",
-        start_date=start_date, end_date=end_date,
-        frequency="d", adjustflag="2",
-    )
-    rows = []
-    while rs.error_code == "0" and rs.next():
-        rows.append(rs.get_row_data())
-    bs.logout()
+    try:
+        bs_code = _code_to_prefix(symbol)
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume,turn,pctChg",
+            start_date=start_date, end_date=end_date,
+            frequency="d", adjustflag="2",
+        )
+        rows = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+    finally:
+        with contextlib.redirect_stdout(io.StringIO()):
+            bs.logout()
 
     if not rows:
         return pd.DataFrame()

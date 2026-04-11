@@ -138,7 +138,7 @@ pj_quant/
 双模型协作 + 多源新闻：
 - glm-4-flash：批量情绪标注（快速、低成本）
 - GLM-5：深度推理分析（慢、高质量）
-- 新闻源：东方财富 + Brave Search
+- 新闻源：东方财富
 - 权重：flash 70% + GLM-5 30%
 
 ### 4. ML模型 (ml/ranker.py)
