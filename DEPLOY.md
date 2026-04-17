@@ -397,28 +397,44 @@ crontab -l
 
 ---
 
-## 8.5、模拟盘（可选）
+## 8.5、模拟盘
 
-模拟盘是独立于实盘的自动化模拟交易系统，复用现有选股和行情模块。
+模拟盘是独立于实盘的自动化模拟交易系统，**盘中用真实行情价格撮合**，收盘后推送日报。
 
-### 启动
+### 运行机制
 
-```bash
-# 单次执行（测试，立即撮合并生成报告）
-python3 main.py sim --run-once
-
-# 常驻进程（盘中每3分钟轮询，收盘后自动推送）
-nohup python3 main.py sim --start --push > logs/sim.log 2>&1 &
+```
+cron 09:05 触发 → 判断交易日 → 启动引擎
+  09:25  盘前准备（加载昨日计划）
+  09:30  开盘，每3分钟轮询真实行情撮合
+  11:30  午休暂停
+  13:00  下午盘继续
+  14:58  停止交易
+  15:00  收盘结算 → 快照 → 生成明日计划 → 推送微信 → 自动退出
 ```
 
-### 常用命令
+- 交易日判断: `chinesecalendar` 排除周末+法定节假日
+- 非交易日自动跳过，无需手动干预
+
+### 手动操作
 
 ```bash
-python3 main.py sim                    # 查看状态（持仓+盈亏）
-python3 main.py sim --report           # 当日报告
-python3 main sim --report --weekly     # 周报（胜率/回撤/夏普）
-python3 main.py sim --history          # 历史交易记录
-python3 main.py sim --reset            # 重置（清空所有数据）
+# 查看状态
+python3 main.py sim
+
+# 离线调试（非盘中，不推送）
+python3 main.py sim --run-once
+
+# 手动启动盘中交易（测试用）
+python3 -u main.py sim --start --push
+
+# 日报/周报/历史
+python3 main.py sim --report
+python3 main.py sim --report --weekly
+python3 main.py sim --history
+
+# 重置（清空所有持仓和数据）
+python3 main.py sim --reset
 ```
 
 ### 数据文件
@@ -429,11 +445,21 @@ python3 main.py sim --reset            # 重置（清空所有数据）
 | `data/sim_portfolio.json` | 模拟盘持仓 |
 | `data/sim_daily_plan.json` | 明日操作计划 |
 
-### 定时任务（可选，替代常驻进程）
+### 定时任务（已配置）
 
 ```cron
-# 模拟盘：每日收盘后单次执行
-30 15 * * 1-5 cd /path/to/pj_quant && source venv/bin/activate && python3 main.py sim --run-once --push >> logs/sim.log 2>&1
+# 模拟盘盘中交易引擎（每天09:05，内部判断交易日）
+5 9 * * * bash run_sim_daily.sh >> logs/sim_daily.log 2>&1
+```
+
+### 日志查看
+
+```bash
+# 实时跟踪
+tail -f logs/sim_daily.log
+
+# 查看进程
+cat /tmp/pj_quant_sim.pid && ps -p $(cat /tmp/pj_quant_sim.pid)
 ```
 
 ---
