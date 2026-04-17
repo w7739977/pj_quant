@@ -530,7 +530,10 @@ class SimEngine:
         print(f"  明日计划: 卖[{sell_str or '无'}] 买[{buy_str or '无'}]")
 
     def _push_daily_report(self):
-        """推送当日报告"""
+        """推送当日报告（仅交易日15:00后）"""
+        if not is_trading_day() or datetime.now().hour < 15:
+            print("  非交易时间，跳过推送")
+            return
         try:
             from simulation.report import daily_report, format_sim_push_message
             from alert.notify import send_message
@@ -614,7 +617,18 @@ class SimEngine:
         """
         单次执行模式（测试用）
         立即执行: 盘前准备 → 盘中撮合 → 收盘结算
+        非交易日/非收盘时间：执行但不推送
         """
+        # 交易日 + 交易时间检查
+        if not is_trading_day():
+            print(f"\n注意: 今天不是交易日，执行仅供测试")
+
+        now_hour = datetime.now().hour
+        can_push = is_trading_day() and now_hour >= 15
+        if push and not can_push:
+            print(f"注意: 当前非收盘时间(需交易日15:00后)，本次不推送")
+            push = False
+
         print(f"\n{'='*50}")
         print(f"模拟盘单次执行 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         print(f"{'='*50}")
