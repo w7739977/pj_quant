@@ -15,9 +15,9 @@ from data.storage import load_daily_data, save_daily_data, get_cached_date_range
 from strategy.etf_rotation import ETFRotationStrategy
 from portfolio.tracker import PortfolioTracker
 from alert.notify import (
-    send_message, format_signal_message, format_no_signal_message,
+    send_to_all, format_signal_message, format_no_signal_message,
 )
-from config.settings import ETF_POOL, PUSHPLUS_TOKEN
+from config.settings import ETF_POOL
 
 
 def run_daily_signal(push: bool = False):
@@ -68,10 +68,9 @@ def run_daily_signal(push: bool = False):
     if not price_data:
         print("错误: 无法获取任何数据，请检查网络连接")
         if push:
-            send_message(
+            send_to_all(
                 "ETF轮动 - 数据获取失败",
                 f"{today} 数据获取失败，请检查云主机网络。",
-                PUSHPLUS_TOKEN,
             )
         return
 
@@ -83,7 +82,7 @@ def run_daily_signal(push: bool = False):
         print("\n无交易信号")
         if push:
             msg = format_no_signal_message(tracker.get_summary())
-            send_message(f"ETF轮动 - {today} 无操作", msg, PUSHPLUS_TOKEN)
+            send_to_all(f"ETF轮动 - {today} 无操作", msg)
         return
 
     # 3. 取最新信号日期
@@ -133,7 +132,7 @@ def run_daily_signal(push: bool = False):
             title = f"ETF轮动 - {today} 无操作"
             msg = format_no_signal_message(summary)
 
-        send_message(title, msg, PUSHPLUS_TOKEN)
+        send_to_all(title, msg)
 
 
 def show_portfolio():

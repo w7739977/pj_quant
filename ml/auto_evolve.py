@@ -266,8 +266,7 @@ def _save_evolve_log(report: dict):
 def _push_report(report: dict):
     """微信推送进化报告"""
     try:
-        from alert.notify import send_message
-        from config.settings import PUSHPLUS_TOKEN
+        from alert.notify import send_to_all
     except ImportError:
         print("推送模块不可用，跳过")
         return
@@ -307,7 +306,7 @@ def _push_report(report: dict):
 Top 5 因子:
 {chr(10).join(f'  {i+1}. {f}: {v:.4f}' for i, (f, v) in enumerate(factors.get('top5', [])))}"""
 
-    send_message(title, msg, PUSHPLUS_TOKEN)
+    send_to_all(title, msg)
     print("进化报告已推送到微信")
 
 
