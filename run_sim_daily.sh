@@ -43,7 +43,7 @@ echo "交易日，启动模拟盘引擎..."
 echo ""
 
 # 启动引擎（盘中交易 + 收盘推送），记录PID
-python main.py sim --start --push &
+python -u main.py sim --start --push &
 PID=$!
 echo $PID > "$PIDFILE"
 echo "引擎已启动 PID=$PID"
