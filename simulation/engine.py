@@ -30,8 +30,13 @@ BAR_INTERVAL_SECONDS = 180  # 3分钟轮询
 
 
 def is_trading_day() -> bool:
-    """判断今天是否交易日（简单版：周一至周五）"""
-    return datetime.now().weekday() < 5
+    """判断今天是否交易日（排除周末和中国法定节假日）"""
+    try:
+        import chinese_calendar
+        return chinese_calendar.is_workday(datetime.now().date())
+    except Exception:
+        # fallback: 仅判断周末
+        return datetime.now().weekday() < 5
 
 
 def is_market_hours() -> bool:
@@ -432,10 +437,16 @@ class SimEngine:
         """
         print("\n  生成明日操作计划...")
 
-        # 计算下一个交易日（跳过周末）
-        next_day = datetime.now() + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
+        # 计算下一个交易日（排除周末和中国法定节假日）
+        try:
+            import chinese_calendar
+            next_day = datetime.now().date() + timedelta(days=1)
+            while not chinese_calendar.is_workday(next_day):
+                next_day += timedelta(days=1)
+        except Exception:
+            next_day = datetime.now() + timedelta(days=1)
+            while next_day.weekday() >= 5:
+                next_day += timedelta(days=1)
         plan = {"date": next_day.strftime("%Y-%m-%d"),
                 "sells": [], "buys": []}
 
