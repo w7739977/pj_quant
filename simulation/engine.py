@@ -548,7 +548,16 @@ class SimEngine:
     # ============ 常驻进程 ============
 
     def start(self, push: bool = False):
-        """启动常驻进程"""
+        """
+        启动盘中交易引擎
+
+        流程: 盘前准备 → 盘中每3分钟撮合 → 收盘结算推送 → 自动退出
+        必须在交易日运行，非交易日直接退出
+        """
+        if not is_trading_day():
+            print("今天不是交易日，退出")
+            return
+
         print(f"\n{'='*50}")
         print(f"模拟盘引擎启动 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         print(f"{'='*50}")
@@ -564,74 +573,81 @@ class SimEngine:
         signal.signal(signal.SIGINT, _signal_handler)
         signal.signal(signal.SIGTERM, _signal_handler)
 
-        pre_open_done = False
-        close_done = False
-        today_str = ""
+        # ======== Phase 1: 盘前准备 ========
+        now = datetime.now()
+        time_str = now.strftime("%H:%M")
+        if time_str < "09:25":
+            wait_sec = (datetime(now.year, now.month, now.day, 9, 25) - now).total_seconds()
+            if wait_sec > 0:
+                print(f"等待至 09:25 开始盘前准备... ({int(wait_sec)}秒)")
+                time.sleep(wait_sec)
 
+        try:
+            self.on_pre_open()
+        except Exception as e:
+            logger.error(f"盘前准备失败: {e}")
+
+        # ======== Phase 2: 盘中交易 (09:30 ~ 14:58) ========
+        print("\n等待开盘 (09:30)...")
+        now = datetime.now()
+        open_time = datetime(now.year, now.month, now.day, 9, 30)
+        if now < open_time:
+            time.sleep((open_time - now).total_seconds())
+
+        print(f"\n=== 开盘 {datetime.now().strftime('%H:%M')} 开始盘中轮询 ===")
+
+        bar_count = 0
         while self._running:
             now = datetime.now()
-            today = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H:%M")
 
-            # 新的一天重置
-            if today != today_str:
-                today_str = today
-                pre_open_done = False
-                close_done = False
-
-            if not is_trading_day():
-                time.sleep(60)
+            # 11:30-12:59 午休，不轮询（但也不退出）
+            if "11:30" <= time_str < "13:00":
+                time.sleep(30)
                 continue
 
-            # 09:10 盘前准备
-            if not pre_open_done and time_str >= "09:10":
-                try:
-                    self.on_pre_open()
-                except Exception as e:
-                    logger.error(f"盘前准备失败: {e}")
-                pre_open_done = True
+            # 14:58 停止盘中轮询
+            if time_str >= "14:58":
+                break
 
-            # 09:33 ~ 14:57 盘中轮询
-            if is_market_hours() and time_str >= "09:33":
-                try:
-                    self.on_bar()
-                except Exception as e:
-                    logger.error(f"盘中轮询失败: {e}")
-                time.sleep(BAR_INTERVAL_SECONDS)
-                continue
+            # 盘中撮合
+            try:
+                self.on_bar()
+                bar_count += 1
+            except Exception as e:
+                logger.error(f"盘中轮询失败: {e}")
 
-            # 15:00 收盘结算
-            if not close_done and time_str >= "15:00":
-                try:
-                    self.on_after_close(push=push)
-                except Exception as e:
-                    logger.error(f"收盘结算失败: {e}")
-                close_done = True
+            time.sleep(BAR_INTERVAL_SECONDS)
 
-            # 非交易时间，降低轮询频率
-            time.sleep(30)
+        print(f"盘中轮询结束，共 {bar_count} 轮")
 
-        print("模拟盘引擎已停止")
+        # ======== Phase 3: 收盘结算 ========
+        print("\n等待收盘 (15:00)...")
+        now = datetime.now()
+        close_time = datetime(now.year, now.month, now.day, 15, 0)
+        if now < close_time:
+            time.sleep((close_time - now).total_seconds())
+
+        try:
+            self.on_after_close(push=push)
+        except Exception as e:
+            logger.error(f"收盘结算失败: {e}")
+
+        print(f"\n模拟盘引擎今日任务完成 {datetime.now().strftime('%H:%M')}")
 
     def run_once(self, push: bool = False):
         """
-        单次执行模式（测试用）
-        立即执行: 盘前准备 → 盘中撮合 → 收盘结算
-        非交易日/非收盘时间：执行但不推送
+        离线测试模式：用当前行情快照一次性撮合
+        注意：此模式不在交易时间内运行，价格非真实盘中价，仅供调试
+        正式交易请用 --start
         """
-        # 交易日 + 交易时间检查
-        if not is_trading_day():
-            print(f"\n注意: 今天不是交易日，执行仅供测试")
-
-        now_hour = datetime.now().hour
-        can_push = is_trading_day() and now_hour >= 15
-        if push and not can_push:
-            print(f"注意: 当前非收盘时间(需交易日15:00后)，本次不推送")
-            push = False
-
         print(f"\n{'='*50}")
-        print(f"模拟盘单次执行 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        print(f"模拟盘离线测试 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        print(f"注意: 非盘中交易，价格仅供参考")
         print(f"{'='*50}")
+
+        # 非交易时间强制不推送
+        push = False
 
         # 刷新持仓
         self.portfolio = self.load_portfolio()
