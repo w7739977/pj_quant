@@ -19,6 +19,13 @@ A股量化交易系统 - 主入口
   python main.py live [--push] [--simulate]    # 激进实盘（100%个股，3只集中持仓）
   python main.py evolve [--push]    # 自动进化（训练+对比+替换+报告）
   python main.py evolve-history     # 查看进化记录
+  python main.py sim                    # 查看模拟盘状态
+  python main.py sim --start [--push]   # 启动模拟盘常驻进程
+  python main.py sim --run-once [--push]# 单次执行（测试）
+  python main.py sim --report           # 绩效报告
+  python main.py sim --report --weekly  # 周报
+  python main.py sim --reset            # 重置模拟盘
+  python main.py sim --history          # 历史交易记录
   python main.py performance [--push]  # 信号绩效追踪报告
 """
 
@@ -396,9 +403,60 @@ def main():
         from scripts.track_performance import run as run_perf
         push = "--push" in sys.argv
         run_perf(push=push)
+    elif command == "sim":
+        run_sim()
     else:
         print(f"未知命令: {command}")
         print(__doc__)
+
+
+def run_sim():
+    """模拟盘管理"""
+    from simulation.engine import SimEngine
+    engine = SimEngine()
+
+    if "--reset" in sys.argv:
+        engine.reset()
+        return
+
+    if "--start" in sys.argv:
+        push = "--push" in sys.argv
+        engine.start(push=push)
+        return
+
+    if "--run-once" in sys.argv:
+        push = "--push" in sys.argv
+        engine.run_once(push=push)
+        return
+
+    if "--history" in sys.argv:
+        from simulation.trade_log import get_trades
+        trades = get_trades()
+        if not trades:
+            print("暂无交易记录")
+            return
+        print(f"\n历史交易记录 (共{len(trades)}笔):")
+        print(f"{'日期':<12} {'操作':<6} {'代码':<8} {'名称':<10} "
+              f"{'股数':>6} {'价格':>8} {'金额':>10} {'盈亏':>10} {'原因'}")
+        print("-" * 90)
+        for t in trades:
+            profit = f"{t['profit']:+,.0f}" if t.get("profit") else ""
+            print(f"{t['date']:<12} {t['side']:<6} {t['symbol']:<8} "
+                  f"{t.get('name', ''):<10} {t['shares']:>6} "
+                  f"{t['price']:>8.2f} {t['amount']:>10,.0f} "
+                  f"{profit:>10} {t.get('reason', '')}")
+        return
+
+    if "--report" in sys.argv:
+        from simulation.report import weekly_report, daily_report
+        if "--weekly" in sys.argv:
+            print(weekly_report())
+        else:
+            print(daily_report())
+        return
+
+    # 默认: 显示状态
+    print(engine.status())
 
 
 if __name__ == "__main__":
