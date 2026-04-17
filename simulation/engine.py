@@ -536,11 +536,10 @@ class SimEngine:
             return
         try:
             from simulation.report import daily_report, format_sim_push_message
-            from alert.notify import send_message
-            from config.settings import PUSHPLUS_TOKEN
+            from alert.notify import send_to_all
             report = daily_report(push_format=True)
             title, content = format_sim_push_message(report)
-            send_message(title, content, PUSHPLUS_TOKEN)
+            send_to_all(title, content)
             print("  日报已推送")
         except Exception as e:
             logger.warning(f"推送失败: {e}")

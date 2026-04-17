@@ -17,7 +17,7 @@ PUSHPLUS_API = "http://www.pushplus.plus/send"
 
 def send_message(title: str, content: str, token: str, template: str = "markdown") -> bool:
     """
-    通过 PushPlus 发送微信消息
+    通过 PushPlus 发送微信消息（单 token）
 
     Parameters
     ----------
@@ -53,6 +53,22 @@ def send_message(title: str, content: str, token: str, template: str = "markdown
     except Exception as e:
         logger.error(f"推送异常: {e}")
         return False
+
+
+def send_to_all(title: str, content: str, template: str = "markdown") -> int:
+    """
+    推送到所有已配置的微信账号（PUSHPLUS_TOKENS 列表）
+
+    Returns
+    -------
+    int: 成功推送的数量
+    """
+    from config.settings import PUSHPLUS_TOKENS
+    success = 0
+    for token in PUSHPLUS_TOKENS:
+        if send_message(title, content, token, template):
+            success += 1
+    return success
 
 
 def format_signal_message(signals_today: list, etf_pool: dict, tracker_summary: str) -> str:

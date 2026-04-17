@@ -422,7 +422,7 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
       7. 推送
     """
     from config.settings import (
-        INITIAL_CAPITAL, PUSHPLUS_TOKEN, ETF_POOL,
+        INITIAL_CAPITAL, ETF_POOL,
         STOP_LOSS_PCT, TAKE_PROFIT_PCT, MAX_HOLDING_DAYS, NUM_POSITIONS,
     )
     from portfolio.tracker import PortfolioTracker
@@ -590,10 +590,10 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
     # ============ 推送 ============
     if push:
         try:
-            from alert.notify import send_message
+            from alert.notify import send_to_all
             push_msg = format_push_message(sell_actions, buy_actions, summary)
             title = f"操作清单 ({datetime.now().strftime('%m-%d')})"
-            send_message(title, push_msg, PUSHPLUS_TOKEN)
+            send_to_all(title, push_msg)
             print("\n已推送到微信")
         except Exception as e:
             logger.warning(f"推送失败: {e}")
@@ -633,7 +633,7 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
     """
     生成今日完整操作清单（标准模式：ETF + 个股）
     """
-    from config.settings import INITIAL_CAPITAL, PUSHPLUS_TOKEN, ETF_POOL
+    from config.settings import INITIAL_CAPITAL, ETF_POOL
     from portfolio.tracker import PortfolioTracker
 
     print("\n" + "=" * 60)
@@ -779,8 +779,7 @@ def _simulate_execution(tracker, actions: list, alloc: dict):
 def _push_deploy_report(actions, alloc, sent_score, top_news, deep):
     """微信推送操作清单"""
     try:
-        from alert.notify import send_message
-        from config.settings import PUSHPLUS_TOKEN
+        from alert.notify import send_to_all
     except ImportError:
         print("推送模块不可用")
         return
@@ -802,5 +801,5 @@ def _push_deploy_report(actions, alloc, sent_score, top_news, deep):
             lines.append(f"  [{tag}] {n['title'][:30]}")
 
     title = f"操作清单 ({alloc['regime']})"
-    send_message(title, "\n".join(lines), PUSHPLUS_TOKEN)
+    send_to_all(title, "\n".join(lines))
     print("操作清单已推送到微信")

@@ -217,9 +217,8 @@ def run(push: bool = False) -> str:
     # 推送
     if push:
         try:
-            from alert.notify import send_message
-            from config.settings import PUSHPLUS_TOKEN
-            send_message("信号绩效报告", report, PUSHPLUS_TOKEN)
+            from alert.notify import send_to_all
+            send_to_all("信号绩效报告", report)
             print("\n已推送到微信")
         except Exception as e:
             print(f"推送失败: {e}")
