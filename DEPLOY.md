@@ -397,6 +397,47 @@ crontab -l
 
 ---
 
+## 8.5、模拟盘（可选）
+
+模拟盘是独立于实盘的自动化模拟交易系统，复用现有选股和行情模块。
+
+### 启动
+
+```bash
+# 单次执行（测试，立即撮合并生成报告）
+python3 main.py sim --run-once
+
+# 常驻进程（盘中每3分钟轮询，收盘后自动推送）
+nohup python3 main.py sim --start --push > logs/sim.log 2>&1 &
+```
+
+### 常用命令
+
+```bash
+python3 main.py sim                    # 查看状态（持仓+盈亏）
+python3 main.py sim --report           # 当日报告
+python3 main sim --report --weekly     # 周报（胜率/回撤/夏普）
+python3 main.py sim --history          # 历史交易记录
+python3 main.py sim --reset            # 重置（清空所有数据）
+```
+
+### 数据文件
+
+| 文件 | 说明 |
+|------|------|
+| `data/sim_trading.db` | SQLite 独立库（订单/成交/每日快照） |
+| `data/sim_portfolio.json` | 模拟盘持仓 |
+| `data/sim_daily_plan.json` | 明日操作计划 |
+
+### 定时任务（可选，替代常驻进程）
+
+```cron
+# 模拟盘：每日收盘后单次执行
+30 15 * * 1-5 cd /path/to/pj_quant && source venv/bin/activate && python3 main.py sim --run-once --push >> logs/sim.log 2>&1
+```
+
+---
+
 ## 九、故障排查
 
 ### 1. preflight 失败告警
@@ -482,6 +523,17 @@ send_message('测试', '部署验证', PUSHPLUS_TOKEN)"
 | `python3 main.py portfolio --reset` | 重置 |
 | `python3 main.py portfolio --buy CODE --shares N --price X` | 模拟买入 |
 | `python3 main.py portfolio --sell CODE --price X` | 模拟卖出 |
+
+**模拟盘：**
+
+| 命令 | 说明 |
+|------|------|
+| `python3 main.py sim` | 查看模拟盘状态 |
+| `python3 main.py sim --start [--push]` | 启动常驻进程 |
+| `python3 main.py sim --run-once [--push]` | 单次执行 |
+| `python3 main.py sim --report [--weekly]` | 日报/周报 |
+| `python3 main.py sim --history` | 历史交易 |
+| `python3 main.py sim --reset` | 重置 |
 
 **运维：**
 

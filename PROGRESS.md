@@ -1,5 +1,89 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-17 模拟盘交易引擎
+
+### 背景
+
+原项目是收盘后选股 → T+1 手动同步操作。现在新增自建模拟撮合引擎，实现全流程自动化模拟交易。
+
+### 设计方案
+
+**双时段模式:**
+```
+09:10  盘前准备: 加载昨日选股计划 → 生成今日订单
+09:33~ 盘中轮询: 每3分钟拉取行情 → 撮合订单 → 实时止损/止盈检查
+15:00  收盘结算: 取消未成交订单 → 每日快照 → 生成明日计划 → 推送日报
+```
+
+**撮合规则:**
+- 市价买入: ask1 + 滑点 (0.01元)
+- 市价卖出: bid1 - 滑点
+- 涨停板: 无法买入 / 跌停板: 无法卖出
+- T+1: 当日买入不可当日卖出
+- 100股整手
+
+### 新增文件
+
+| 文件 | 职责 |
+|------|------|
+| `simulation/__init__.py` | 模块入口 |
+| `simulation/matcher.py` | 撮合器: 买卖撮合、涨跌停检查、止损/止盈实时触发、T+1规则 |
+| `simulation/engine.py` | 主引擎: 常驻进程、APScheduler式定时调度、订单管理 |
+| `simulation/trade_log.py` | 交易记录持久化 (SQLite独立库 sim_trading.db) + 每日快照 + 持仓管理 |
+| `simulation/report.py` | 日报/周报生成 + 微信推送格式化 + 绩效统计 (胜率/回撤/夏普) |
+
+### 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `main.py` | 新增 `sim` 命令 (start/run-once/report/history/reset) |
+| `config/settings.py` | 新增模拟盘参数 (SIM_INITIAL_CAPITAL/SIM_DB_PATH/SIM_BAR_INTERVAL) |
+
+### 命令用法
+
+```bash
+python main.py sim                    # 查看模拟盘状态
+python main.py sim --start [--push]   # 启动常驻进程
+python main.py sim --run-once [--push]# 单次执行（测试）
+python main.py sim --report           # 当日报告
+python main.py sim --report --weekly  # 周报（胜率/回撤/夏普）
+python main.py sim --history          # 历史交易记录
+python main.py sim --reset            # 重置（清空持仓+数据库）
+```
+
+### 数据存储
+
+模拟盘与实盘完全隔离:
+- **SQLite**: `data/sim_trading.db` (sim_orders / sim_trades / sim_snapshots)
+- **持仓**: `data/sim_portfolio.json`
+- **计划**: `data/sim_daily_plan.json`
+
+### 与现有模块的关系
+
+| 现有模块 | 复用方式 |
+|---------|---------|
+| `portfolio/tracker.py` | 复用思路，模拟盘独立持仓实例 |
+| `portfolio/allocator.py` | 复用 `get_stock_picks_live()` 选股 |
+| `portfolio/trade_utils.py` | 复用手续费计算、板块过滤、股数计算 |
+| `data/fetcher.py` | 复用 `fetch_realtime_tencent_batch()` 行情 |
+| `alert/notify.py` | 复用 PushPlus 微信推送 |
+| `ml/ranker.py` | 复用 ML 预测 |
+
+### 自测结果
+
+- 重置 → 空仓 → 生成计划(5只) → 第二轮买入成交5只 → 持仓正确 → 快照正确
+- 止损/止盈/T+1/涨跌停逻辑验证通过
+- `--status` / `--history` / `--report` / `--report --weekly` 输出正确
+- 57个原有测试全部通过
+
+### 已知限制
+
+- `is_trading_day()` 仅判断周一至周五，未排除法定节假日
+- 行情通过腾讯接口获取（无五档盘口），bid1/ask1 用当前价模拟
+- 常驻进程模式未实际部署验证（需配合 crontab 或 systemd）
+
+---
+
 ## 2026-04-08 激进实盘部署
 
 ### 模型训练完成

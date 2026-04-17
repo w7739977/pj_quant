@@ -34,6 +34,12 @@ python main.py deploy       # 生成今日操作清单
 | 命令 | 说明 |
 |------|------|
 | `python main.py live [--push] [--simulate]` | **激进实盘**：持仓检查+选股+精确股数+推送 |
+| `python main.py sim` | **模拟盘**：查看状态 |
+| `python main.py sim --start [--push]` | 启动模拟盘常驻进程 |
+| `python main.py sim --run-once [--push]` | 模拟盘单次执行 |
+| `python main.py sim --report [--weekly]` | 模拟盘日报/周报 |
+| `python main.py sim --history` | 模拟盘历史交易 |
+| `python main.py sim --reset` | 重置模拟盘 |
 | `python main.py portfolio` | 查看持仓（含实时盈亏） |
 | `python main.py portfolio --buy CODE --shares N --price X` | 记录买入 |
 | `python main.py portfolio --sell CODE --price X` | 记录卖出 |
@@ -94,6 +100,12 @@ pj_quant/
 │   ├── tracker.py             # 持仓跟踪（实时盈亏/手动同步）
 │   └── trade_utils.py         # 交易工具（板块过滤/股数/成本）
 │
+├── simulation/
+│   ├── engine.py              # 模拟盘主引擎（常驻进程+定时调度）
+│   ├── matcher.py             # 撮合器（涨跌停/T+1/止损止盈）
+│   ├── trade_log.py           # 交易记录+每日快照（SQLite）
+│   └── report.py              # 日报/周报+绩效统计
+│
 ├── backtest/
 │   └── engine.py              # 回测引擎
 │
@@ -117,6 +129,15 @@ pj_quant/
 - **选股** → 多因子打分 ∩ ML预测排名，双重确认加分
 - **精确下单** → 实时价格 + 100股整手 + 交易成本估算
 - **simulate模式** → 先卖后买，实际资金计算，零偏差
+
+### 1.5 模拟盘引擎 (simulation/)
+
+自建模拟撮合，与实盘完全隔离，复用现有选股/行情/推送：
+- **双时段运行** → 盘前加载计划 → 盘中每3分钟轮询撮合 → 收盘结算
+- **撮合规则** → ask1/bid1成交 + 滑点 + 涨跌停/T+1/止损止盈
+- **独立存储** → SQLite(sim_trading.db) + JSON持仓
+- **绩效统计** → 日报/周报，胜率、最大回撤、夏普比率
+- **常驻进程** → `--start` 后自动运行，收盘后推送
 
 ### 2. 数据获取 (data/)
 
