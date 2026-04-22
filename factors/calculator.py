@@ -15,7 +15,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from factors.data_loader import get_stock_daily, get_stock_fundamentals, get_small_cap_stocks
+from factors.data_loader import get_small_cap_stocks
 from data.storage import load_stock_daily
 
 
@@ -168,7 +168,7 @@ def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) 
     """
     if end_date is None:
         end_date = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
+    start = (pd.to_datetime(end_date) - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
 
     # 直接读本地SQLite，不做网络fallback（避免BaoStock连接失败阻塞）
     df = load_stock_daily(symbol)
