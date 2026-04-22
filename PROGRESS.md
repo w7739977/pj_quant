@@ -1,5 +1,155 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-22 因子计算卡死 + GLM-5 静默失败修复
+
+### 背景
+
+每日15:30 cron执行 `run_daily.sh` → `live --push`，当天推送未收到。排查发现进程卡在因子计算环节37分钟+，日志大量 `Broken pipe` 和 `服务器连接失败`。
+
+### 问题一：因子计算网络 fallback 导致卡死
+
+**根因**：`factors/calculator.py` 中 `compute_stock_pool_factors()` 对2868只股票逐个调用 `get_stock_daily()`，本地SQLite无缓存的股票会 fallback 到 BaoStock/AKShare，收盘后这些网络请求大量超时失败，每个阻塞数秒，累积导致整个流程卡死。此外 `get_stock_fundamentals()` 也会调用腾讯批量API获取基本面数据，收盘后同样不稳定。
+
+**修改文件**：`factors/calculator.py`
+
+**改动1 — `compute_all_factors()` 改为纯本地读取**
+
+```python
+# 修改前：
+from factors.data_loader import get_stock_daily, get_stock_fundamentals, get_small_cap_stocks
+
+def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) -> dict:
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
+
+    df = get_stock_daily(symbol, start, end_date)  # ← 会 fallback 到 BaoStock
+    if df is None or len(df) < 20:
+        return {}
+
+    factors = {"code": symbol}
+    factors.update(calc_momentum(df))
+    factors.update(calc_volatility(df))
+    factors.update(calc_turnover_factor(df))
+    factors.update(calc_volume_price(df))
+    factors.update(calc_technical(df))
+    return factors
+```
+
+```python
+# 修改后：
+from factors.data_loader import get_stock_daily, get_stock_fundamentals, get_small_cap_stocks
+from data.storage import load_stock_daily  # ← 新增：直接读本地SQLite
+
+def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) -> dict:
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
+
+    # 直接读本地SQLite，不做网络fallback
+    df = load_stock_daily(symbol)
+    if df is None or df.empty or len(df) < 20:
+        return {}
+    df = df[(df["date"] >= start) & (df["date"] <= end_date)]
+    if len(df) < 20:
+        return {}
+
+    factors = {"code": symbol}
+    factors.update(calc_momentum(df))
+    factors.update(calc_volatility(df))
+    factors.update(calc_turnover_factor(df))
+    factors.update(calc_volume_price(df))
+    factors.update(calc_technical(df))
+
+    # 基本面因子：直接从本地SQLite读取，避免收盘后调用腾讯API
+    last_row = df.iloc[-1]
+    for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]:
+        factors[col] = last_row.get(col, np.nan)
+
+    return factors
+```
+
+**改动2 — `compute_stock_pool_factors()` 去掉网络调用**
+
+```python
+# 修改前：
+    # 基本面因子（批量获取，高效）
+    fund = get_stock_fundamentals(symbols)          # ← 调用腾讯批量API
+    fund_dict = {}
+    if not fund.empty:
+        for _, row in fund.iterrows():
+            fund_dict[row["code"]] = row.to_dict()
+
+    all_factors = []
+    for i, sym in enumerate(symbols):
+        try:
+            f = compute_all_factors(sym, end_date)
+            if f:
+                # 合并基本面
+                fd = fund_dict.get(sym, {})
+                f["pe_ttm"] = fd.get("pe_ttm", np.nan)
+                f["pb"] = fd.get("pb", np.nan)
+                f["market_cap"] = fd.get("market_cap", np.nan)
+                f["turnover_rate"] = fd.get("turnover_rate", np.nan)
+                f["volume_ratio"] = fd.get("volume_ratio", np.nan)
+                all_factors.append(f)
+```
+
+```python
+# 修改后（基本面因子已在 compute_all_factors 中从本地读取）：
+    # 逐只计算因子（基本面因子已从本地SQLite读取，无需网络请求）
+    all_factors = []
+    for i, sym in enumerate(symbols):
+        try:
+            f = compute_all_factors(sym, end_date)
+            if f:
+                all_factors.append(f)
+```
+
+### 问题二：GLM-5 思考模型 max_tokens 耗尽导致静默失败
+
+**根因**：GLM-5 是深度思考模型，`reasoning_tokens` 计入 `max_tokens` 预算。原来设置 `max_tokens=2000`，全部被推理过程消耗，`content` 始终为空字符串。API返回200但实际输出为空，`_call_llm()` 返回空串，GLM-5 深度分析一直静默失败，情绪分析只靠 glm-4-flash 单模型（70%权重）。
+
+**验证**：
+```
+max_tokens=200:  reasoning_tokens=199,  content='' (全被思考消耗)
+max_tokens=500:  reasoning_tokens=499,  content='' (全被思考消耗)
+max_tokens=8000: reasoning_tokens=1679, content=完整JSON (正常)
+```
+
+**修改文件**：`sentiment/analyzer.py`
+
+```python
+# 修改前：
+    content = _call_llm("glm-5", prompt, max_tokens=2000, temperature=0.3, timeout=120)
+
+# 修改后：
+    content = _call_llm("glm-5", prompt, max_tokens=8000, temperature=0.3, timeout=180)
+```
+
+### 修改文件汇总
+
+| 文件 | 变更 |
+|------|------|
+| `factors/calculator.py` | `compute_all_factors()` 改用 `load_stock_daily()` 纯本地读取，新增基本面因子提取；`compute_stock_pool_factors()` 去掉 `get_stock_fundamentals()` 网络调用 |
+| `sentiment/analyzer.py` | GLM-5 `max_tokens` 2000→8000，timeout 120→180 |
+
+### 效果对比
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| 因子计算耗时 | 37分钟+卡死 | 3分36秒完成 |
+| Broken pipe 错误 | 大量 | 0 |
+| GLM-5 深度分析 | 静默失败（content为空） | 正常返回JSON |
+| 推送 | 未送达 | 正常送达微信 |
+
+### 运维操作
+
+- 清理 root crontab 中5个 openclaw 定时任务，只保留 stargate
+- 终止2个 openclaw stock_monitor 常驻进程
+
+---
+
 ## 2026-04-17 模拟盘交易引擎
 
 ### 背景
