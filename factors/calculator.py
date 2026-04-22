@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from factors.data_loader import get_stock_daily, get_stock_fundamentals, get_small_cap_stocks
+from data.storage import load_stock_daily
 
 
 def calc_momentum(df: pd.DataFrame, periods: list = [5, 10, 20, 60]) -> dict:
@@ -169,8 +170,13 @@ def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) 
         end_date = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
 
-    df = get_stock_daily(symbol, start, end_date)
-    if df is None or len(df) < 20:
+    # 直接读本地SQLite，不做网络fallback（避免BaoStock连接失败阻塞）
+    df = load_stock_daily(symbol)
+    if df is None or df.empty or len(df) < 20:
+        return {}
+    # 按日期过滤
+    df = df[(df["date"] >= start) & (df["date"] <= end_date)]
+    if len(df) < 20:
         return {}
 
     factors = {"code": symbol}
@@ -179,6 +185,12 @@ def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) 
     factors.update(calc_turnover_factor(df))
     factors.update(calc_volume_price(df))
     factors.update(calc_technical(df))
+
+    # 基本面因子：直接从本地SQLite读取，避免收盘后调用腾讯API
+    last_row = df.iloc[-1]
+    for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]:
+        factors[col] = last_row.get(col, np.nan)
+
     return factors
 
 
@@ -278,26 +290,12 @@ def compute_stock_pool_factors(
     symbols = pool["code"].tolist()
     logger.info(f"开始计算 {len(symbols)} 只股票的因子...")
 
-    # 基本面因子（批量获取，高效）
-    fund = get_stock_fundamentals(symbols)
-    fund_dict = {}
-    if not fund.empty:
-        for _, row in fund.iterrows():
-            fund_dict[row["code"]] = row.to_dict()
-
-    # 逐只计算技术/量价因子
+    # 逐只计算因子（基本面因子已从本地SQLite读取，无需网络请求）
     all_factors = []
     for i, sym in enumerate(symbols):
         try:
             f = compute_all_factors(sym, end_date)
             if f:
-                # 合并基本面
-                fd = fund_dict.get(sym, {})
-                f["pe_ttm"] = fd.get("pe_ttm", np.nan)
-                f["pb"] = fd.get("pb", np.nan)
-                f["market_cap"] = fd.get("market_cap", np.nan)
-                f["turnover_rate"] = fd.get("turnover_rate", np.nan)
-                f["volume_ratio"] = fd.get("volume_ratio", np.nan)
                 all_factors.append(f)
 
                 if (i + 1) % 50 == 0:

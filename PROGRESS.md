@@ -1,5 +1,251 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-22 因子计算卡死 + GLM-5 静默失败修复
+
+### 背景
+
+每日15:30 cron执行 `run_daily.sh` → `live --push`，当天推送未收到。排查发现进程卡在因子计算环节37分钟+，日志大量 `Broken pipe` 和 `服务器连接失败`。
+
+### 问题一：因子计算网络 fallback 导致卡死
+
+**根因**：`factors/calculator.py` 中 `compute_stock_pool_factors()` 对2868只股票逐个调用 `get_stock_daily()`，本地SQLite无缓存的股票会 fallback 到 BaoStock/AKShare，收盘后这些网络请求大量超时失败，每个阻塞数秒，累积导致整个流程卡死。此外 `get_stock_fundamentals()` 也会调用腾讯批量API获取基本面数据，收盘后同样不稳定。
+
+**修改文件**：`factors/calculator.py`
+
+**改动1 — `compute_all_factors()` 改为纯本地读取**
+
+```python
+# 修改前：
+from factors.data_loader import get_stock_daily, get_stock_fundamentals, get_small_cap_stocks
+
+def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) -> dict:
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
+
+    df = get_stock_daily(symbol, start, end_date)  # ← 会 fallback 到 BaoStock
+    if df is None or len(df) < 20:
+        return {}
+
+    factors = {"code": symbol}
+    factors.update(calc_momentum(df))
+    factors.update(calc_volatility(df))
+    factors.update(calc_turnover_factor(df))
+    factors.update(calc_volume_price(df))
+    factors.update(calc_technical(df))
+    return factors
+```
+
+```python
+# 修改后：
+from factors.data_loader import get_stock_daily, get_stock_fundamentals, get_small_cap_stocks
+from data.storage import load_stock_daily  # ← 新增：直接读本地SQLite
+
+def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) -> dict:
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
+
+    # 直接读本地SQLite，不做网络fallback
+    df = load_stock_daily(symbol)
+    if df is None or df.empty or len(df) < 20:
+        return {}
+    df = df[(df["date"] >= start) & (df["date"] <= end_date)]
+    if len(df) < 20:
+        return {}
+
+    factors = {"code": symbol}
+    factors.update(calc_momentum(df))
+    factors.update(calc_volatility(df))
+    factors.update(calc_turnover_factor(df))
+    factors.update(calc_volume_price(df))
+    factors.update(calc_technical(df))
+
+    # 基本面因子：直接从本地SQLite读取，避免收盘后调用腾讯API
+    last_row = df.iloc[-1]
+    for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]:
+        factors[col] = last_row.get(col, np.nan)
+
+    return factors
+```
+
+**改动2 — `compute_stock_pool_factors()` 去掉网络调用**
+
+```python
+# 修改前：
+    # 基本面因子（批量获取，高效）
+    fund = get_stock_fundamentals(symbols)          # ← 调用腾讯批量API
+    fund_dict = {}
+    if not fund.empty:
+        for _, row in fund.iterrows():
+            fund_dict[row["code"]] = row.to_dict()
+
+    all_factors = []
+    for i, sym in enumerate(symbols):
+        try:
+            f = compute_all_factors(sym, end_date)
+            if f:
+                # 合并基本面
+                fd = fund_dict.get(sym, {})
+                f["pe_ttm"] = fd.get("pe_ttm", np.nan)
+                f["pb"] = fd.get("pb", np.nan)
+                f["market_cap"] = fd.get("market_cap", np.nan)
+                f["turnover_rate"] = fd.get("turnover_rate", np.nan)
+                f["volume_ratio"] = fd.get("volume_ratio", np.nan)
+                all_factors.append(f)
+```
+
+```python
+# 修改后（基本面因子已在 compute_all_factors 中从本地读取）：
+    # 逐只计算因子（基本面因子已从本地SQLite读取，无需网络请求）
+    all_factors = []
+    for i, sym in enumerate(symbols):
+        try:
+            f = compute_all_factors(sym, end_date)
+            if f:
+                all_factors.append(f)
+```
+
+### 问题二：GLM-5 思考模型 max_tokens 耗尽导致静默失败
+
+**根因**：GLM-5 是深度思考模型，`reasoning_tokens` 计入 `max_tokens` 预算。原来设置 `max_tokens=2000`，全部被推理过程消耗，`content` 始终为空字符串。API返回200但实际输出为空，`_call_llm()` 返回空串，GLM-5 深度分析一直静默失败，情绪分析只靠 glm-4-flash 单模型（70%权重）。
+
+**验证**：
+```
+max_tokens=200:  reasoning_tokens=199,  content='' (全被思考消耗)
+max_tokens=500:  reasoning_tokens=499,  content='' (全被思考消耗)
+max_tokens=8000: reasoning_tokens=1679, content=完整JSON (正常)
+```
+
+**修改文件**：`sentiment/analyzer.py`
+
+```python
+# 修改前：
+    content = _call_llm("glm-5", prompt, max_tokens=2000, temperature=0.3, timeout=120)
+
+# 修改后：
+    content = _call_llm("glm-5", prompt, max_tokens=8000, temperature=0.3, timeout=180)
+```
+
+### 修改文件汇总
+
+| 文件 | 变更 |
+|------|------|
+| `factors/calculator.py` | `compute_all_factors()` 改用 `load_stock_daily()` 纯本地读取，新增基本面因子提取；`compute_stock_pool_factors()` 去掉 `get_stock_fundamentals()` 网络调用 |
+| `sentiment/analyzer.py` | GLM-5 `max_tokens` 2000→8000，timeout 120→180 |
+
+### 效果对比
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| 因子计算耗时 | 37分钟+卡死 | 3分36秒完成 |
+| Broken pipe 错误 | 大量 | 0 |
+| GLM-5 深度分析 | 静默失败（content为空） | 正常返回JSON |
+| 推送 | 未送达 | 正常送达微信 |
+
+### 运维操作
+
+- 清理 root crontab 中5个 openclaw 定时任务，只保留 stargate
+- 终止2个 openclaw stock_monitor 常驻进程
+
+---
+
+## 2026-04-17 模拟盘交易引擎
+
+### 背景
+
+原项目是收盘后选股 → T+1 手动同步操作。现在新增自建模拟撮合引擎，实现全流程自动化模拟交易。
+
+### 设计方案
+
+**盘中实时交易模式:**
+```
+cron 09:05 触发 → 判断交易日(chinesecalendar) → 启动引擎
+  09:25  盘前准备: 加载昨日选股计划 → 生成今日订单
+  09:30  开盘: 每3分钟拉取实时行情 → 真实价格撮合 → 止损/止盈监控
+  11:30  午休暂停
+  13:00  下午盘继续轮询
+  14:58  停止盘中轮询
+  15:00  收盘结算 → 每日快照 → 生成明日计划 → 推送日报微信 → 引擎自动退出
+```
+
+**撮合规则:**
+- 市价买入: ask1 + 滑点 (0.01元)
+- 市价卖出: bid1 - 滑点
+- 涨停板: 无法买入 / 跌停板: 无法卖出
+- T+1: 当日买入不可当日卖出
+- 100股整手
+
+**交易日判断:**
+- 使用 `chinesecalendar` 库精确排除周末+法定节假日（劳动节/国庆/春节等）
+- `run_sim_daily.sh` 入口处判断，非交易日直接跳过
+
+**交易时间校验:**
+- 所有交易操作必须在 09:30-14:58 盘中执行，使用当时真实行情价格
+- `run_once` 模式仅供离线调试，强制不推送
+- 收盘后只做结算/快照/推送，不再撮合新订单
+
+### 新增文件
+
+| 文件 | 职责 |
+|------|------|
+| `simulation/__init__.py` | 模块入口 |
+| `simulation/matcher.py` | 撮合器: 买卖撮合、涨跌停检查、止损/止盈实时触发、T+1规则 |
+| `simulation/engine.py` | 主引擎: 常驻进程、APScheduler式定时调度、订单管理 |
+| `simulation/trade_log.py` | 交易记录持久化 (SQLite独立库 sim_trading.db) + 每日快照 + 持仓管理 |
+| `simulation/report.py` | 日报/周报生成 + 微信推送格式化 + 绩效统计 (胜率/回撤/夏普) |
+
+### 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `main.py` | 新增 `sim` 命令 (start/run-once/report/history/reset) |
+| `config/settings.py` | 新增模拟盘参数 (SIM_INITIAL_CAPITAL/SIM_DB_PATH/SIM_BAR_INTERVAL) |
+
+### 命令用法
+
+```bash
+python main.py sim                    # 查看模拟盘状态
+python main.py sim --start [--push]   # 启动常驻进程
+python main.py sim --run-once [--push]# 单次执行（测试）
+python main.py sim --report           # 当日报告
+python main.py sim --report --weekly  # 周报（胜率/回撤/夏普）
+python main.py sim --history          # 历史交易记录
+python main.py sim --reset            # 重置（清空持仓+数据库）
+```
+
+### 数据存储
+
+模拟盘与实盘完全隔离:
+- **SQLite**: `data/sim_trading.db` (sim_orders / sim_trades / sim_snapshots)
+- **持仓**: `data/sim_portfolio.json`
+- **计划**: `data/sim_daily_plan.json`
+
+### 与现有模块的关系
+
+| 现有模块 | 复用方式 |
+|---------|---------|
+| `portfolio/tracker.py` | 复用思路，模拟盘独立持仓实例 |
+| `portfolio/allocator.py` | 复用 `get_stock_picks_live()` 选股 |
+| `portfolio/trade_utils.py` | 复用手续费计算、板块过滤、股数计算 |
+| `data/fetcher.py` | 复用 `fetch_realtime_tencent_batch()` 行情 |
+| `alert/notify.py` | 复用 PushPlus 微信推送 |
+| `ml/ranker.py` | 复用 ML 预测 |
+
+### 自测结果
+
+- 重置 → 空仓 → 生成计划(5只) → 第二轮买入成交5只 → 持仓正确 → 快照正确
+- 止损/止盈/T+1/涨跌停逻辑验证通过
+- `--status` / `--history` / `--report` / `--report --weekly` 输出正确
+- 57个原有测试全部通过
+
+### 已知限制
+
+- 行情通过腾讯接口获取（无五档盘口），bid1/ask1 用当前价模拟
+- 调休上班日 `chinesecalendar.is_workday()=True`，但交易所不开盘（极少见）
+
+---
+
 ## 2026-04-08 激进实盘部署
 
 ### 模型训练完成

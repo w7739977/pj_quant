@@ -259,7 +259,7 @@ def glm5_deep_analysis(news_with_scores: list):
 请严格按以下JSON格式回复:
 {{"theme": "今日市场主线（一句话）", "adjusted_score": 0.0, "analysis": "100字以内深度分析", "action": "加仓/减仓/持有/观望", "risks": ["风险1", "风险2"]}}"""
 
-    content = _call_llm("glm-5", prompt, max_tokens=2000, temperature=0.3, timeout=120)
+    content = _call_llm("glm-5", prompt, max_tokens=8000, temperature=0.3, timeout=180)
 
     if not content:
         return None
