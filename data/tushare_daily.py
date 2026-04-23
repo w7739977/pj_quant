@@ -120,6 +120,9 @@ def _process_parquet_batch(conn, batch_files, written_tables):
     final_cols = ["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"]
     for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
         batch_df[c] = pd.to_numeric(batch_df[c], errors="coerce")
+        nan_rate = batch_df[c].isna().mean()
+        if nan_rate > 0.1:
+            logger.warning(f"列 {c} NaN 率 {nan_rate:.0%}，可能数据源异常")
 
     written = 0
     for code, group in batch_df.groupby("code"):
@@ -149,39 +152,40 @@ def import_to_sqlite(limit=0):
         return 0
 
     conn = sqlite3.connect(DB_PATH)
+    try:
+        # 清空旧 stock_* 表（确保干净导入）
+        old_tables = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+            ).fetchall()
+        ]
+        if old_tables:
+            print(f"  清空 {len(old_tables)} 个旧 stock 表...")
+            for t in old_tables:
+                conn.execute(f"DROP TABLE IF EXISTS {t}")
+            conn.commit()
 
-    # 清空旧 stock_* 表（确保干净导入）
-    old_tables = [
-        r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
-        ).fetchall()
-    ]
-    if old_tables:
-        print(f"  清空 {len(old_tables)} 个旧 stock 表...")
-        for t in old_tables:
-            conn.execute(f"DROP TABLE IF EXISTS {t}")
-        conn.commit()
+        written_tables = set()
+        BATCH_SIZE = 100  # 每批100个日期文件 (~48万行)
+        total_files = len(parquet_files)
+        t0 = time.time()
 
-    written_tables = set()
-    BATCH_SIZE = 100  # 每批100个日期文件 (~48万行)
-    total_files = len(parquet_files)
-    t0 = time.time()
+        for batch_start in range(0, total_files, BATCH_SIZE):
+            batch = parquet_files[batch_start:batch_start + BATCH_SIZE]
+            _process_parquet_batch(conn, batch, written_tables)
+            conn.commit()
 
-    for batch_start in range(0, total_files, BATCH_SIZE):
-        batch = parquet_files[batch_start:batch_start + BATCH_SIZE]
-        _process_parquet_batch(conn, batch, written_tables)
-        conn.commit()
+            done = min(batch_start + BATCH_SIZE, total_files)
+            elapsed = time.time() - t0
+            rate = done / elapsed if elapsed > 0 else 0
+            eta = (total_files - done) / rate / 60 if rate > 0 else 0
+            print(f"  入库 [{done}/{total_files} 文件] {len(written_tables)} 只股票 eta~{eta:.0f}min")
 
-        done = min(batch_start + BATCH_SIZE, total_files)
         elapsed = time.time() - t0
-        rate = done / elapsed if elapsed > 0 else 0
-        eta = (total_files - done) / rate / 60 if rate > 0 else 0
-        print(f"  入库 [{done}/{total_files} 文件] {len(written_tables)} 只股票 eta~{eta:.0f}min")
-
-    conn.close()
-    elapsed = time.time() - t0
-    print(f"\n入库完成: {len(written_tables)} 只股票, 耗时={elapsed/60:.1f}min")
-    return len(written_tables)
+        print(f"\n入库完成: {len(written_tables)} 只股票, 耗时={elapsed/60:.1f}min")
+        return len(written_tables)
+    finally:
+        conn.close()
 
 
 def get_last_trade_date_in_db(db_path=DB_PATH) -> Optional[str]:
@@ -252,60 +256,63 @@ def import_to_sqlite_incremental(new_dates: list) -> int:
     print(f"  增量导入 {len(parquet_files)} 个日期文件...")
 
     conn = sqlite3.connect(DB_PATH)
+    try:
+        # 去重: 删除已有表中 >= 最早新日期的数据
+        min_date_yyyymmdd = min(new_dates)
+        min_date_str = f"{min_date_yyyymmdd[:4]}-{min_date_yyyymmdd[4:6]}-{min_date_yyyymmdd[6:8]}"
 
-    # 去重: 删除已有表中 >= 最早新日期的数据
-    min_date_yyyymmdd = min(new_dates)
-    min_date_str = f"{min_date_yyyymmdd[:4]}-{min_date_yyyymmdd[4:6]}-{min_date_yyyymmdd[6:8]}"
+        existing_tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+            ).fetchall()
+        }
 
-    existing_tables = {
-        r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
-        ).fetchall()
-    }
+        # 用 _process_parquet_batch 处理，但禁止 replace
+        dfs = []
+        for fname in parquet_files:
+            fpath = os.path.join(PARQUET_DIR, fname)
+            dfs.append(pd.read_parquet(fpath))
 
-    # 用 _process_parquet_batch 处理，但禁止 replace
-    dfs = []
-    for fname in parquet_files:
-        fpath = os.path.join(PARQUET_DIR, fname)
-        dfs.append(pd.read_parquet(fpath))
+        if not dfs:
+            return 0
 
-    if not dfs:
+        batch_df = pd.concat(dfs, ignore_index=True)
+        batch_df["code"] = batch_df["ts_code"].str.split(".").str[0]
+
+        col_map = {"vol": "volume", "amount": "turnover"}
+        batch_df = batch_df.rename(columns=col_map)
+        batch_df["date"] = pd.to_datetime(batch_df["trade_date"], format="%Y%m%d")
+
+        # 排除科创板
+        batch_df = batch_df[~batch_df["code"].str.startswith("688")]
+
+        final_cols = ["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"]
+        for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
+            batch_df[c] = pd.to_numeric(batch_df[c], errors="coerce")
+            nan_rate = batch_df[c].isna().mean()
+            if nan_rate > 0.1:
+                logger.warning(f"列 {c} NaN 率 {nan_rate:.0%}，可能数据源异常")
+
+        written = 0
+        for code, group in batch_df.groupby("code"):
+            table = f"stock_{code}"
+            stock_df = group[[c for c in final_cols if c in group.columns]].sort_values("date").reset_index(drop=True)
+
+            if table in existing_tables:
+                # 已有表: 先删除重复日期，再追加
+                conn.execute(f"DELETE FROM {table} WHERE date >= ?", (min_date_str,))
+                stock_df.to_sql(table, conn, if_exists="append", index=False)
+            else:
+                # 新表(IPO新股): 直接创建
+                stock_df.to_sql(table, conn, if_exists="replace", index=False)
+                existing_tables.add(table)
+            written += 1
+
+        conn.commit()
+        print(f"  增量入库完成: {written} 只股票")
+        return written
+    finally:
         conn.close()
-        return 0
-
-    batch_df = pd.concat(dfs, ignore_index=True)
-    batch_df["code"] = batch_df["ts_code"].str.split(".").str[0]
-
-    col_map = {"vol": "volume", "amount": "turnover"}
-    batch_df = batch_df.rename(columns=col_map)
-    batch_df["date"] = pd.to_datetime(batch_df["trade_date"], format="%Y%m%d")
-
-    # 排除科创板
-    batch_df = batch_df[~batch_df["code"].str.startswith("688")]
-
-    final_cols = ["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"]
-    for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
-        batch_df[c] = pd.to_numeric(batch_df[c], errors="coerce")
-
-    written = 0
-    for code, group in batch_df.groupby("code"):
-        table = f"stock_{code}"
-        stock_df = group[[c for c in final_cols if c in group.columns]].sort_values("date").reset_index(drop=True)
-
-        if table in existing_tables:
-            # 已有表: 先删除重复日期，再追加
-            conn.execute(f"DELETE FROM {table} WHERE date >= ?", (min_date_str,))
-            stock_df.to_sql(table, conn, if_exists="append", index=False)
-        else:
-            # 新表(IPO新股): 直接创建
-            stock_df.to_sql(table, conn, if_exists="replace", index=False)
-            existing_tables.add(table)
-        written += 1
-
-    conn.commit()
-    conn.close()
-    print(f"  增量入库完成: {written} 只股票")
-    return written
 
 
 def run(limit=0, incremental=False):

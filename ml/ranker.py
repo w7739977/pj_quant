@@ -21,7 +21,6 @@ import logging
 from datetime import datetime, timedelta
 
 from factors.calculator import compute_stock_pool_factors
-from factors.data_loader import get_stock_daily
 
 logger = logging.getLogger(__name__)
 

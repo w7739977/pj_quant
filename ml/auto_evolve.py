@@ -44,7 +44,7 @@ def evolve(push: bool = False) -> dict:
         train_model, get_model_info, PRODUCTION_MODEL, FEATURE_COLS,
     )
     from factors.calculator import compute_stock_pool_factors, _batch_sentiment_factors
-    from factors.data_loader import get_stock_daily, get_small_cap_stocks
+    from factors.data_loader import get_small_cap_stocks
     from config.settings import INITIAL_CAPITAL
 
     _ensure_dirs()

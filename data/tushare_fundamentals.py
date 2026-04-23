@@ -202,72 +202,74 @@ def import_to_sqlite(limit=0, only_dates=None):
 
     # Step 2: 获取本地已有表名
     conn = sqlite3.connect(DB_PATH)
-    existing_tables = {
-        r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
-        ).fetchall()
-    }
+    try:
+        existing_tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+            ).fetchall()
+        }
 
-    UPDATE_COLS = ["pe_ttm", "pb", "ps_ttm", "turnover_rate", "volume_ratio"]
-    updated_stocks = set()
-    total_stocks = all_df["code"].nunique()
-    t0 = time.time()
+        UPDATE_COLS = ["pe_ttm", "pb", "ps_ttm", "turnover_rate", "volume_ratio", "total_mv", "circ_mv"]
+        updated_stocks = set()
+        total_stocks = all_df["code"].nunique()
+        t0 = time.time()
 
-    # Step 3: 按股票分组批量更新
-    for i, (code, group) in enumerate(all_df.groupby("code")):
-        table = f"stock_{code}"
-        if table not in existing_tables:
-            continue
+        # Step 3: 按股票分组批量更新
+        for i, (code, group) in enumerate(all_df.groupby("code")):
+            table = f"stock_{code}"
+            if table not in existing_tables:
+                continue
 
-        # 确保列存在
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        for col in UPDATE_COLS:
-            if col not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
-        conn.commit()
+            # 确保列存在
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for col in UPDATE_COLS:
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL")
+            conn.commit()
 
-        # 读取本地日期映射 (rowid → date_str)
-        local = pd.read_sql(f"SELECT rowid, date FROM {table}", conn)
-        local["date_str"] = local["date"].astype(str).str[:10]
+            # 读取本地日期映射 (rowid → date_str)
+            local = pd.read_sql(f"SELECT rowid, date FROM {table}", conn)
+            local["date_str"] = local["date"].astype(str).str[:10]
 
-        # 合并
-        merged = local.merge(group[["date_str"] + UPDATE_COLS], on="date_str", how="inner")
+            # 合并
+            merged = local.merge(group[["date_str"] + UPDATE_COLS], on="date_str", how="inner")
 
-        if merged.empty:
-            continue
+            if merged.empty:
+                continue
 
-        # 批量 UPDATE
-        set_clause = ", ".join(f"{col}=?" for col in UPDATE_COLS)
-        updates = []
-        for _, row in merged.iterrows():
-            vals = tuple(
-                None if pd.isna(row[col]) else float(row[col])
-                for col in UPDATE_COLS
-            ) + (int(row["rowid"]),)
-            updates.append(vals)
+            # 批量 UPDATE
+            set_clause = ", ".join(f"{col}=?" for col in UPDATE_COLS)
+            updates = []
+            for _, row in merged.iterrows():
+                vals = tuple(
+                    None if pd.isna(row[col]) else float(row[col])
+                    for col in UPDATE_COLS
+                ) + (int(row["rowid"]),)
+                updates.append(vals)
 
-        conn.executemany(f"UPDATE {table} SET {set_clause} WHERE rowid=?", updates)
-        conn.commit()
-        updated_stocks.add(code)
+            conn.executemany(f"UPDATE {table} SET {set_clause} WHERE rowid=?", updates)
+            conn.commit()
+            updated_stocks.add(code)
 
-        if (i + 1) % 500 == 0 or (i + 1) == total_stocks:
-            elapsed = time.time() - t0
-            rate = (i + 1) / elapsed if elapsed > 0 else 0
-            eta = (total_stocks - i - 1) / rate / 60 if rate > 0 else 0
-            print(f"  入库 [{i+1}/{total_stocks}] 已更新 {len(updated_stocks)} 只 "
-                  f"eta~{eta:.0f}min")
+            if (i + 1) % 500 == 0 or (i + 1) == total_stocks:
+                elapsed = time.time() - t0
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                eta = (total_stocks - i - 1) / rate / 60 if rate > 0 else 0
+                print(f"  入库 [{i+1}/{total_stocks}] 已更新 {len(updated_stocks)} 只 "
+                      f"eta~{eta:.0f}min")
 
-    conn.close()
-    elapsed = time.time() - t0
+        elapsed = time.time() - t0
 
-    # ===== 验证入库结果 =====
-    # 增量模式跳过验证（数据量小），全量模式保留
-    if only_dates is None:
-        print("\n  验证入库结果...")
-        _verify_import()
+        # ===== 验证入库结果 =====
+        # 增量模式跳过验证（数据量小），全量模式保留
+        if only_dates is None:
+            print("\n  验证入库结果...")
+            _verify_import()
 
-    print(f"\n入库完成: {len(updated_stocks)} 只股票已更新, 耗时={elapsed/60:.1f}min")
-    return len(updated_stocks)
+        print(f"\n入库完成: {len(updated_stocks)} 只股票已更新, 耗时={elapsed/60:.1f}min")
+        return len(updated_stocks)
+    finally:
+        conn.close()
 
 
 def _verify_import(sample_date=None):
