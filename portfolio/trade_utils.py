@@ -232,11 +232,15 @@ def format_push_message(sell_actions: list, buy_actions: list, summary: dict) ->
     if buy_actions:
         lines.append("**买入:**")
         for a in buy_actions:
-            lines.append(
+            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            line = (
                 f"- {a.get('name', '')}({a['code']})"
                 f" {a['shares']}股({a['shares']//100}手)"
                 f"@{a['price']:.2f} = {a['amount']:,.0f}元"
             )
+            if reason_str:
+                line += f"\n  {reason_str}"
+            lines.append(line)
 
     if not sell_actions and not buy_actions:
         lines.append("今日无操作")
