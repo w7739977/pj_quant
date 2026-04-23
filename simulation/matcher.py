@@ -20,6 +20,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_SLIPPAGE = 0.01
 
 
+def _calc_days(buy_date: str) -> int:
+    """计算持有天数"""
+    if not buy_date:
+        return 0
+    try:
+        buy_dt = datetime.strptime(buy_date, "%Y-%m-%d")
+        return (datetime.now() - buy_dt).days
+    except ValueError:
+        return 0
+
+
 class Order:
     """订单"""
     __slots__ = ("order_id", "symbol", "side", "order_type", "shares", "price",
@@ -152,18 +163,19 @@ class Matcher:
             return None
 
         pnl_pct = current_price / avg_cost - 1.0
+        pnl_amount = (current_price - avg_cost) * shares
         reason = ""
 
         if pnl_pct <= stop_loss_pct:
-            reason = f"止损({pnl_pct:+.1%})"
+            reason = f"止损({pnl_pct:+.1%}, 持有{_calc_days(buy_date)}日, {pnl_amount:+,.0f}元)"
         elif pnl_pct >= take_profit_pct:
-            reason = f"止盈({pnl_pct:+.1%})"
+            reason = f"止盈({pnl_pct:+.1%}, 持有{_calc_days(buy_date)}日, {pnl_amount:+,.0f}元)"
         elif buy_date:
             try:
                 buy_dt = datetime.strptime(buy_date, "%Y-%m-%d")
                 days = (datetime.now() - buy_dt).days
                 if days >= max_holding_days and abs(pnl_pct) < 0.03:
-                    reason = f"超时调仓(持有{days}日)"
+                    reason = f"超时调仓(持有{days}日, 收益{pnl_pct:+.1%}, {pnl_amount:+,.0f}元)"
             except ValueError:
                 pass
 

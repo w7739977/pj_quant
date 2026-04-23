@@ -19,6 +19,8 @@ import os
 import time
 from datetime import datetime, timedelta
 
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,123 @@ def is_market_hours() -> bool:
         return False
     now = datetime.now().strftime("%H:%M")
     return MARKET_OPEN <= now < MARKET_CLOSE
+
+
+def _calc_single_stock_dims(factors: dict) -> dict:
+    """
+    给单只股票计算三维度得分（技术面/基本面/资金面）
+    返回每个维度的: 总分、各因子原始值和加减分明细
+    """
+    import math
+
+    def _valid(v):
+        return v is not None and not (isinstance(v, float) and math.isnan(v))
+
+    def _fmt(v, pct=False):
+        if v is None: return "N/A"
+        try:
+            f = float(v)
+            if pct: return f"{f*100:+.1f}%"
+            return f"{f:.1f}"
+        except (ValueError, TypeError):
+            return "N/A"
+
+    # ---- 技术面: 动量 + RSI + MA偏离 ----
+    tech_items = []
+    tech_score = 50
+
+    mom = factors.get("mom_20d")
+    if _valid(mom):
+        delta, label = 0, "震荡"
+        if mom > 0.15:
+            delta, label = 20, "强势"
+        elif mom > 0.05:
+            delta, label = 10, "偏强"
+        elif mom < -0.10:
+            delta, label = -20, "弱势"
+        tech_score += delta
+        tech_items.append({"name": "20日涨幅", "value": _fmt(mom, True), "delta": delta, "label": label})
+
+    rsi = factors.get("rsi_14")
+    if _valid(rsi):
+        delta, label = 0, "正常"
+        if rsi > 70:
+            delta, label = -5, "超买"
+        elif rsi < 30:
+            delta, label = 10, "超卖反弹"
+        tech_score += delta
+        tech_items.append({"name": "RSI", "value": f"{float(rsi):.0f}", "delta": delta, "label": label})
+
+    ma5 = factors.get("ma5_bias")
+    if _valid(ma5):
+        tech_items.append({"name": "MA5偏离", "value": _fmt(ma5, True), "delta": 0, "label": ""})
+
+    tech_score = max(0, min(100, tech_score))
+
+    # ---- 基本面: PE + PB ----
+    fund_items = []
+    fund_score = 50
+
+    pe = factors.get("pe_ttm")
+    if _valid(pe):
+        delta, label = 0, "合理"
+        if pe < 0:
+            delta, label = -20, "亏损"
+        elif pe < 15:
+            delta, label = 20, "低估值"
+        elif pe > 50:
+            delta, label = -10, "高估值"
+        fund_score += delta
+        fund_items.append({"name": "PE", "value": f"{float(pe):.1f}", "delta": delta, "label": label})
+
+    pb = factors.get("pb")
+    if _valid(pb):
+        delta, label = 0, ""
+        if pb < 1:
+            delta, label = 15, "破净"
+        elif pb > 5:
+            delta, label = -5, "估值偏高"
+        fund_score += delta
+        fund_items.append({"name": "PB", "value": f"{float(pb):.1f}", "delta": delta, "label": label})
+
+    fund_score = max(0, min(100, fund_score))
+
+    # ---- 资金面: 换手率 + 量比 + 放量 ----
+    cap_items = []
+    cap_score = 50
+
+    tr = factors.get("turnover_rate")
+    if _valid(tr):
+        delta, label = 0, "正常"
+        if tr > 10:
+            delta, label = 15, "活跃"
+        elif tr > 3:
+            delta, label = 5, "正常"
+        else:
+            delta, label = -5, "清淡"
+        cap_score += delta
+        cap_items.append({"name": "换手率", "value": f"{float(tr):.1f}%", "delta": delta, "label": label})
+
+    vs = factors.get("volume_surge")
+    if _valid(vs):
+        delta, label = 0, ""
+        if vs > 2:
+            delta, label = 10, "放量"
+        cap_score += delta
+        cap_items.append({"name": "量比", "value": f"{float(vs):.1f}", "delta": delta, "label": label})
+
+    vr = factors.get("volume_ratio")
+    if _valid(vr):
+        cap_items.append({"name": "成交比", "value": f"{float(vr):.2f}", "delta": 0, "label": ""})
+
+    cap_score = max(0, min(100, cap_score))
+
+    return {
+        "技术面": {"score": tech_score, "items": tech_items},
+        "基本面": {"score": fund_score, "items": fund_items},
+        "资金面": {"score": cap_score, "items": cap_items},
+    }
+
 
 
 class SimEngine:
@@ -387,6 +506,171 @@ class SimEngine:
         from simulation.report import daily_report
         print(daily_report())
 
+    def _evaluate_rotation(self, remaining_holdings: dict, quotes: dict) -> tuple:
+        """
+        调仓评估: 对比持仓因子得分与候选池，找出值得换仓的弱股
+
+        Returns
+        -------
+        (rotation_sells, holding_scores)
+        """
+        from factors.calculator import compute_all_factors
+        from strategy.small_cap import SmallCapStrategy
+
+        # 1. 给持仓算因子
+        holding_factors = {}
+        for code in remaining_holdings:
+            f = compute_all_factors(code)
+            if f:
+                holding_factors[code] = f
+
+        if not holding_factors:
+            return [], {}
+
+        hf_df = pd.DataFrame(holding_factors.values())
+        sc = SmallCapStrategy(top_n=50)
+        scored = sc._score_stocks(hf_df)
+        scored = scored.sort_values("score", ascending=False)
+        scored["factor_rank_local"] = range(1, len(scored) + 1)
+
+        # 2. ML预测持仓
+        ml_ranks = {}
+        try:
+            from ml.ranker import predict
+            pred = predict(hf_df)
+            if not pred.empty:
+                for _, row in pred.iterrows():
+                    ml_ranks[row["code"]] = int(row["rank"])
+        except Exception:
+            pass
+
+        # 3. 计算持仓得分
+        holding_scores = {}
+        for _, row in scored.iterrows():
+            code = row["code"]
+            fr = int(row["factor_rank_local"])
+            mr = ml_ranks.get(code, 999)
+            in_both = 1 if fr <= 20 and mr <= 20 else 0
+            final_score = (1.0 / fr * 100 + 1.0 / mr * 50 + in_both * 20)
+            holding_scores[code] = {
+                "factor_rank": fr,
+                "ml_rank": mr,
+                "final_score": final_score,
+            }
+
+        # 4. 获取候选池 top3 的分数作为标杆
+        # 直接复用 get_stock_picks_live 的内部排名，但只取分数参考
+        # 用持仓中得分最高的作为"阈值"，低于此值50%+且浮亏则调仓
+        if not holding_scores:
+            return [], {}
+
+        scores = [v["final_score"] for v in holding_scores.values()]
+        max_hold_score = max(scores) if scores else 0
+
+        rotation_sells = []
+        for code, info in remaining_holdings.items():
+            if code not in holding_scores:
+                continue
+            hs = holding_scores[code]
+            q = quotes.get(code, {})
+            price = q.get("price", info["avg_cost"])
+            if price <= 0 or info["avg_cost"] <= 0:
+                continue
+            pnl_pct = price / info["avg_cost"] - 1.0
+            pnl_amount = (price - info["avg_cost"]) * info["shares"]
+            days_held = 0
+            if info.get("buy_date"):
+                try:
+                    buy_dt = datetime.strptime(info["buy_date"], "%Y-%m-%d")
+                    days_held = (datetime.now() - buy_dt).days
+                except ValueError:
+                    pass
+
+            # 调仓条件:
+            # - 持仓得分远低于组合内最高分(差距>50%)
+            # - 且浮亏或微盈(<3%)
+            # - 持有超过5天(避免刚买就换)
+            score_ratio = hs["final_score"] / max_hold_score if max_hold_score > 0 else 1
+            if (score_ratio < 0.5
+                    and pnl_pct < 0.03
+                    and days_held >= 5
+                    and hs["final_score"] < 30):
+                name = q.get("name", code)
+                rotation_sells.append({
+                    "code": code,
+                    "name": name,
+                    "shares": info["shares"],
+                    "price": price,
+                    "reason": (
+                        f"调仓换股(得分{hs['final_score']:.0f}远低于最优{max_hold_score:.0f},"
+                        f" 收益{pnl_pct:+.1%}, 持有{days_held}日)"
+                    ),
+                })
+
+        # 按得分从低到高排序，优先换最差的
+        rotation_sells.sort(key=lambda x: holding_scores.get(x["code"], {}).get("final_score", 999))
+        return rotation_sells, holding_scores
+
+    def _analyze_holdings(self, holdings: dict, quotes: dict) -> list:
+        """
+        分析每只持仓的因子状态，供报告展示
+
+        Returns
+        -------
+        list of dict: [{code, name, pnl_pct, pnl_amount, days_held, factors}]
+        """
+        from factors.calculator import compute_all_factors
+
+        results = []
+        for code, info in holdings.items():
+            q = quotes.get(code, {})
+            price = q.get("price", info["avg_cost"])
+            name = q.get("name", code)
+            pnl_pct = (price / info["avg_cost"] - 1) if info["avg_cost"] > 0 else 0
+            pnl_amount = (price - info["avg_cost"]) * info["shares"] if info["avg_cost"] > 0 else 0
+            days_held = 0
+            if info.get("buy_date"):
+                try:
+                    buy_dt = datetime.strptime(info["buy_date"], "%Y-%m-%d")
+                    days_held = (datetime.now() - buy_dt).days
+                except ValueError:
+                    pass
+
+            # 计算因子
+            factors = compute_all_factors(code)
+
+            # 计算维度得分
+            dim_scores = _calc_single_stock_dims(factors) if factors else {}
+
+            # 个股情绪分析（新闻/利好利空）
+            sentiment = {}
+            try:
+                from sentiment.analyzer import analyze_stock_sentiment
+                sentiment = analyze_stock_sentiment(code, name)
+            except Exception as e:
+                logger.debug(f"个股情绪分析失败 {code}: {e}")
+
+            results.append({
+                "code": code,
+                "name": name,
+                "price": round(price, 2),
+                "avg_cost": info["avg_cost"],
+                "pnl_pct": round(pnl_pct * 100, 1),
+                "pnl_amount": round(pnl_amount, 0),
+                "days_held": days_held,
+                "factors": {
+                    "mom_20d": factors.get("mom_20d"),
+                    "vol_10d": factors.get("vol_10d"),
+                    "rsi_14": factors.get("rsi_14"),
+                    "pe_ttm": factors.get("pe_ttm"),
+                    "pb": factors.get("pb"),
+                    "turnover_rate": factors.get("turnover_rate"),
+                },
+                "dimension_scores": dim_scores,
+                "sentiment": sentiment,
+            })
+        return results
+
     def _save_daily_snapshot(self):
         """保存每日快照"""
         from simulation.matcher import fetch_quotes_batch
@@ -432,8 +716,9 @@ class SimEngine:
         """
         生成明日操作计划
         1. 检查持仓是否需要卖出（止损/止盈/超时）
-        2. 选股生成买入计划
-        3. 保存计划文件
+        2. 调仓评估: 对比持仓与候选池
+        3. 选股生成买入计划
+        4. 保存计划文件
         """
         print("\n  生成明日操作计划...")
 
@@ -466,18 +751,21 @@ class SimEngine:
                     continue
                 pnl_pct = price / info["avg_cost"] - 1 if info["avg_cost"] > 0 else 0
                 reason = ""
-                if pnl_pct <= self.stop_loss_pct:
-                    reason = f"止损({pnl_pct:+.1%})"
-                elif pnl_pct >= self.take_profit_pct:
-                    reason = f"止盈({pnl_pct:+.1%})"
-                elif info.get("buy_date"):
+                pnl_amount = (price - info["avg_cost"]) * info["shares"]
+                days_held = 0
+                if info.get("buy_date"):
                     try:
                         buy_dt = datetime.strptime(info["buy_date"], "%Y-%m-%d")
-                        days = (datetime.now() - buy_dt).days
-                        if days >= self.max_holding_days and abs(pnl_pct) < 0.03:
-                            reason = f"超时调仓预判(已{days}日)"
+                        days_held = (datetime.now() - buy_dt).days
                     except ValueError:
                         pass
+
+                if pnl_pct <= self.stop_loss_pct:
+                    reason = f"止损({pnl_pct:+.1%}, 持有{days_held}日, {pnl_amount:+,.0f}元)"
+                elif pnl_pct >= self.take_profit_pct:
+                    reason = f"止盈({pnl_pct:+.1%}, 持有{days_held}日, {pnl_amount:+,.0f}元)"
+                elif days_held >= self.max_holding_days and abs(pnl_pct) < 0.03:
+                    reason = f"超时调仓预判(已{days_held}日, 收益{pnl_pct:+.1%}, {pnl_amount:+,.0f}元)"
 
                 if reason:
                     plan["sells"].append({
@@ -487,6 +775,36 @@ class SimEngine:
                         "price": price,
                         "reason": reason,
                     })
+
+        # 1.5 调仓逻辑: 对比持仓与候选池，主动换仓
+        sell_codes = {s["code"] for s in plan["sells"]}
+        remaining_holdings = {c: i for c, i in holdings.items()
+                              if c not in sell_codes}
+        rotation_done = 0
+        max_rotation = 2  # 每天最多调仓2只
+
+        if remaining_holdings and rotation_done < max_rotation:
+            try:
+                rotation_sells, rotation_holding_scores = (
+                    self._evaluate_rotation(remaining_holdings, quotes)
+                )
+                for rs in rotation_sells:
+                    if rotation_done >= max_rotation:
+                        break
+                    plan["sells"].append(rs)
+                    rotation_done += 1
+                    print(f"  [调仓卖出] {rs['code']} → {rs['reason']}")
+            except Exception as e:
+                logger.warning(f"调仓评估失败: {e}")
+
+        # 保存持仓因子分析（供报告使用）
+        if remaining_holdings:
+            try:
+                plan["holding_analysis"] = self._analyze_holdings(
+                    remaining_holdings, quotes
+                )
+            except Exception:
+                plan["holding_analysis"] = []
 
         # 2. 买入计划: 计算可用仓位后选股
         current_count = len(holdings) - len(plan["sells"])
@@ -520,6 +838,40 @@ class SimEngine:
                     })
             except Exception as e:
                 logger.warning(f"选股失败: {e}")
+
+        # 生成决策摘要（无操作理由）
+        notes = []
+        if not plan["sells"] and not plan["buys"]:
+            if not holdings:
+                notes.append("空仓且资金不足5000元，无法建仓")
+            elif slots == 0:
+                # 持仓已满，说明每只持仓的理由
+                from simulation.matcher import fetch_quotes_batch
+                qts = fetch_quotes_batch(list(holdings.keys())) if holdings else {}
+                hold_notes = []
+                for code, info in holdings.items():
+                    q = qts.get(code, {})
+                    p = q.get("price", info["avg_cost"])
+                    pct = (p / info["avg_cost"] - 1) if info["avg_cost"] > 0 else 0
+                    hold_notes.append(f"{code}({pct:+.1%})")
+                notes.append(f"仓位已满({len(holdings)}只)，均未触发止损/止盈/超时")
+            elif available < 5000:
+                notes.append(f"可用资金{available:,.0f}元不足5000元，无法建仓")
+            else:
+                notes.append("选股未产生合格标的")
+        elif not plan["sells"]:
+            if holdings:
+                from simulation.matcher import fetch_quotes_batch
+                qts = fetch_quotes_batch(list(holdings.keys())) if holdings else {}
+                hold_status = []
+                for code, info in holdings.items():
+                    q = qts.get(code, {})
+                    p = q.get("price", info["avg_cost"])
+                    pct = (p / info["avg_cost"] - 1) if info["avg_cost"] > 0 else 0
+                    hold_status.append(f"{code}({pct:+.1%})")
+                notes.append(f"持仓正常: {', '.join(hold_status)}")
+        if notes:
+            plan["decision_note"] = "; ".join(notes)
 
         # 保存计划
         with open(self._plan_file, "w") as f:

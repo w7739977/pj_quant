@@ -274,6 +274,61 @@ def check_holdings(tracker, stop_loss_pct: float = -0.08,
     return sell_actions
 
 
+def _calc_dimension_scores(candidates: pd.DataFrame, factor_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将因子得分拆解为技术面/基本面/资金面三个维度
+    每个维度是百分制，便于理解
+    """
+    # 维度定义和权重
+    dimensions = {
+        "技术面": {
+            "factors": ["mom_5d", "mom_10d", "mom_20d", "mom_60d",
+                         "vol_10d", "vol_20d",
+                         "ma5_bias", "ma10_bias", "ma20_bias", "rsi_14"],
+            "directions": [1, 1, 1, 1, -1, -1, -1, -1, -1, -1],
+            "weights": [2, 1, 2, 1, 1, 1, 1, 1, 1, 1],
+        },
+        "基本面": {
+            "factors": ["pe_ttm", "pb", "turnover_rate", "volume_ratio"],
+            "directions": [-1, -1, 1, 1],
+            "weights": [1.5, 1.5, 1, 1],
+        },
+        "资金面": {
+            "factors": ["avg_turnover_5d", "avg_turnover_20d", "turnover_accel",
+                         "volume_surge", "vol_price_diverge"],
+            "directions": [1, 1, 1, 1, 1],
+            "weights": [1, 1, 1, 1, 1],
+        },
+    }
+
+    for dim_name, dim_config in dimensions.items():
+        dim_score = pd.Series(0.0, index=factor_df.index)
+        total_weight = 0.0
+
+        for fac, direction, weight in zip(
+            dim_config["factors"], dim_config["directions"], dim_config["weights"]
+        ):
+            if fac not in factor_df.columns:
+                continue
+            series = pd.to_numeric(factor_df[fac], errors="coerce")
+            valid = series.notna()
+            if valid.sum() < 5:
+                continue
+            rank = series.rank(pct=True, na_option="keep")
+            if direction == -1:
+                rank = 1 - rank
+            dim_score += rank.fillna(0.5) * weight
+            total_weight += weight
+
+        if total_weight > 0:
+            # 归一化到百分制
+            candidates[f"{dim_name}_score"] = round(dim_score / total_weight * 100, 1)
+        else:
+            candidates[f"{dim_name}_score"] = 50.0
+
+    return candidates
+
+
 def get_stock_picks_live(stock_capital: float, top_n: int = 3,
                         exclude_codes: list = None) -> list:
     """
@@ -314,6 +369,7 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
 
     # Step 3: ML 预测
     ml_rank_map = {}
+    pred = pd.DataFrame()
     try:
         from ml.ranker import predict
         print("  ML 模型预测...")
@@ -336,6 +392,9 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         + candidates["in_both"] * 20
     )
     candidates = candidates.sort_values("final_score", ascending=False)
+
+    # Step 4.5: 计算各维度得分拆解（技术面/基本面/资金面）
+    candidates = _calc_dimension_scores(candidates, factor_df)
 
     # 过滤: 可交易 + 未持有
     filtered = candidates[
@@ -392,7 +451,34 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         factor_rank = int(row["factor_rank"])
         ml_rank = int(row["ml_rank"])
         tag = "★双重确认" if row["in_both"] else ""
-        reason = f"因子#{factor_rank} ML#{ml_rank} {tag}".strip()
+
+        # 构建详细理由：排名 + 关键因子指标 + ML预测收益
+        reason_parts = [f"因子#{factor_rank} ML#{ml_rank}"]
+        if tag:
+            reason_parts.append(tag)
+
+        # 提取 top3 关键因子值
+        key_factors = []
+        for fac in ["mom_20d", "vol_10d", "pe_ttm", "pb", "turnover_rate"]:
+            val = row.get(fac)
+            if val is not None and not (isinstance(val, float) and (val != val)):
+                if fac in ("pe_ttm", "pb"):
+                    key_factors.append(f"{fac}:{val:.1f}")
+                else:
+                    key_factors.append(f"{fac}:{val:+.1%}" if abs(val) < 10 else f"{fac}:{val:.2f}")
+        if key_factors:
+            reason_parts.append("|".join(key_factors[:3]))
+
+        # ML预测收益
+        ml_pred = ml_rank_map.get(code)
+        if ml_pred is not None:
+            pred_row = pred[pred["code"] == code]
+            if not pred_row.empty:
+                pred_ret = pred_row.iloc[0].get("predicted_return", 0)
+                if pred_ret is not None:
+                    reason_parts.append(f"预测20日收益:{pred_ret:+.1%}")
+
+        reason = " ".join(reason_parts)
 
         picks.append({
             "code": code,
@@ -403,6 +489,11 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             "cost": cost,
             "reason": reason,
             "final_score": round(float(row["final_score"]), 2),
+            "dimension_scores": {
+                "技术面": row.get("技术面_score", None),
+                "基本面": row.get("基本面_score", None),
+                "资金面": row.get("资金面_score", None),
+            },
         })
 
     return picks
