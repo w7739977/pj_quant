@@ -14,14 +14,13 @@
 import json
 import logging
 import signal
-import sys
 import os
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from simulation.matcher import fetch_quotes_batch, _calc_trade_days
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +177,7 @@ class SimEngine:
         )
         from config.settings import (
             INITIAL_CAPITAL, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
-            MAX_HOLDING_DAYS, NUM_POSITIONS,
+            MAX_HOLDING_DAYS, NUM_POSITIONS, MIN_BUY_CAPITAL,
         )
 
         self.Matcher = Matcher
@@ -197,6 +196,7 @@ class SimEngine:
         self.take_profit_pct = TAKE_PROFIT_PCT
         self.max_holding_days = MAX_HOLDING_DAYS
         self.max_positions = NUM_POSITIONS
+        self.min_buy_capital = MIN_BUY_CAPITAL
 
         self.portfolio = load_sim_portfolio()
         self.orders_pending = []       # 待执行订单
@@ -215,7 +215,7 @@ class SimEngine:
         }
         self.save_portfolio(self.portfolio)
         self.orders_pending = []
-        self.daily_plan = []
+        self.daily_plan = {}
         if os.path.exists(self._plan_file):
             os.remove(self._plan_file)
         # 清空 SQLite 数据
@@ -227,7 +227,6 @@ class SimEngine:
 
     def status(self) -> str:
         """当前状态概览"""
-        from simulation.matcher import fetch_quotes_batch
         portfolio = self.portfolio
         cash = portfolio.get("cash", 0)
         holdings = portfolio.get("holdings", {})
@@ -345,7 +344,6 @@ class SimEngine:
         if not codes:
             return
 
-        from simulation.matcher import fetch_quotes_batch
         quotes = fetch_quotes_batch(list(codes))
 
         # 1. 撮合待执行订单
@@ -405,6 +403,16 @@ class SimEngine:
                         print(f"  [止损/止盈触发] {code} {stop_order.reason}"
                               f" @ {stop_order.filled_price:.2f}")
 
+    def _get_order_reason_data(self, order) -> str:
+        """从计划中获取订单对应的 reason_data（JSON 字符串）"""
+        import json as _json
+        for buy in self.daily_plan.get("buys", []):
+            if buy.get("code") == order.symbol:
+                rd = buy.get("reason_data")
+                if rd:
+                    return _json.dumps(rd, ensure_ascii=False) if isinstance(rd, dict) else str(rd)
+        return ""
+
     def _execute_order(self, order, quote: dict):
         """执行已成交的订单，更新持仓"""
         name = quote.get("name", order.symbol)
@@ -442,6 +450,7 @@ class SimEngine:
             self.save_trade(
                 order.symbol, name, "buy", shares, price, amount, fee,
                 reason=order.reason, order_id=order.order_id,
+                reason_data=self._get_order_reason_data(order),
             )
             print(f"  [成交买入] {name}({order.symbol})"
                   f" {shares}股@{price:.2f} = {amount:,.0f}元"
@@ -578,13 +587,7 @@ class SimEngine:
                 continue
             pnl_pct = price / info["avg_cost"] - 1.0
             pnl_amount = (price - info["avg_cost"]) * info["shares"]
-            days_held = 0
-            if info.get("buy_date"):
-                try:
-                    buy_dt = datetime.strptime(info["buy_date"], "%Y-%m-%d")
-                    days_held = (datetime.now() - buy_dt).days
-                except ValueError:
-                    pass
+            days_held = _calc_trade_days(info.get("buy_date", ""))
 
             # 调仓条件:
             # - 持仓得分远低于组合内最高分(差距>50%)
@@ -628,13 +631,7 @@ class SimEngine:
             name = q.get("name", code)
             pnl_pct = (price / info["avg_cost"] - 1) if info["avg_cost"] > 0 else 0
             pnl_amount = (price - info["avg_cost"]) * info["shares"] if info["avg_cost"] > 0 else 0
-            days_held = 0
-            if info.get("buy_date"):
-                try:
-                    buy_dt = datetime.strptime(info["buy_date"], "%Y-%m-%d")
-                    days_held = (datetime.now() - buy_dt).days
-                except ValueError:
-                    pass
+            days_held = _calc_trade_days(info.get("buy_date", ""))
 
             # 计算因子
             factors = compute_all_factors(code)
@@ -673,7 +670,6 @@ class SimEngine:
 
     def _save_daily_snapshot(self):
         """保存每日快照"""
-        from simulation.matcher import fetch_quotes_batch
         portfolio = self.portfolio
         cash = portfolio.get("cash", 0)
         holdings = portfolio.get("holdings", {})
@@ -740,7 +736,6 @@ class SimEngine:
         cash = portfolio.get("cash", 0)
 
         # 1. 卖出计划: 用当前价检查止损/止盈/超时
-        from simulation.matcher import fetch_quotes_batch
         if holdings:
             codes = list(holdings.keys())
             quotes = fetch_quotes_batch(codes)
@@ -752,20 +747,14 @@ class SimEngine:
                 pnl_pct = price / info["avg_cost"] - 1 if info["avg_cost"] > 0 else 0
                 reason = ""
                 pnl_amount = (price - info["avg_cost"]) * info["shares"]
-                days_held = 0
-                if info.get("buy_date"):
-                    try:
-                        buy_dt = datetime.strptime(info["buy_date"], "%Y-%m-%d")
-                        days_held = (datetime.now() - buy_dt).days
-                    except ValueError:
-                        pass
+                days_held = _calc_trade_days(info.get("buy_date", ""))
 
                 if pnl_pct <= self.stop_loss_pct:
-                    reason = f"止损({pnl_pct:+.1%}, 持有{days_held}日, {pnl_amount:+,.0f}元)"
+                    reason = f"止损({pnl_pct:+.1%}, 持有{days_held}交易日, {pnl_amount:+,.0f}元)"
                 elif pnl_pct >= self.take_profit_pct:
-                    reason = f"止盈({pnl_pct:+.1%}, 持有{days_held}日, {pnl_amount:+,.0f}元)"
+                    reason = f"止盈({pnl_pct:+.1%}, 持有{days_held}交易日, {pnl_amount:+,.0f}元)"
                 elif days_held >= self.max_holding_days and abs(pnl_pct) < 0.03:
-                    reason = f"超时调仓预判(已{days_held}日, 收益{pnl_pct:+.1%}, {pnl_amount:+,.0f}元)"
+                    reason = f"超时调仓预判(已{days_held}交易日, 收益{pnl_pct:+.1%}, {pnl_amount:+,.0f}元)"
 
                 if reason:
                     plan["sells"].append({
@@ -783,7 +772,7 @@ class SimEngine:
         rotation_done = 0
         max_rotation = 2  # 每天最多调仓2只
 
-        if remaining_holdings and rotation_done < max_rotation:
+        if remaining_holdings:
             try:
                 rotation_sells, rotation_holding_scores = (
                     self._evaluate_rotation(remaining_holdings, quotes)
@@ -817,7 +806,7 @@ class SimEngine:
         )
         available = cash + sell_cash
 
-        if slots > 0 and available >= 5000:
+        if slots > 0 and available >= self.min_buy_capital:
             try:
                 from portfolio.allocator import get_stock_picks_live
                 exclude = [c for c in holdings.keys()
@@ -843,10 +832,9 @@ class SimEngine:
         notes = []
         if not plan["sells"] and not plan["buys"]:
             if not holdings:
-                notes.append("空仓且资金不足5000元，无法建仓")
+                notes.append(f"空仓且资金不足{self.min_buy_capital}元，无法建仓")
             elif slots == 0:
                 # 持仓已满，说明每只持仓的理由
-                from simulation.matcher import fetch_quotes_batch
                 qts = fetch_quotes_batch(list(holdings.keys())) if holdings else {}
                 hold_notes = []
                 for code, info in holdings.items():
@@ -855,13 +843,12 @@ class SimEngine:
                     pct = (p / info["avg_cost"] - 1) if info["avg_cost"] > 0 else 0
                     hold_notes.append(f"{code}({pct:+.1%})")
                 notes.append(f"仓位已满({len(holdings)}只)，均未触发止损/止盈/超时")
-            elif available < 5000:
-                notes.append(f"可用资金{available:,.0f}元不足5000元，无法建仓")
+            elif available < self.min_buy_capital:
+                notes.append(f"可用资金{available:,.0f}元不足{self.min_buy_capital}元，无法建仓")
             else:
                 notes.append("选股未产生合格标的")
         elif not plan["sells"]:
             if holdings:
-                from simulation.matcher import fetch_quotes_batch
                 qts = fetch_quotes_batch(list(holdings.keys())) if holdings else {}
                 hold_status = []
                 for code, info in holdings.items():
@@ -1009,7 +996,6 @@ class SimEngine:
         # 2. 立即撮合所有订单（先卖后买，确保资金正确）
         if self.orders_pending:
             print("\n撮合待执行订单...")
-            from simulation.matcher import fetch_quotes_batch
 
             # 先卖后买
             sell_orders = [o for o in self.orders_pending if o.side == "sell"]
@@ -1050,7 +1036,6 @@ class SimEngine:
                                    if o.status == "pending"]
 
         # 3. 止损检查
-        from simulation.matcher import fetch_quotes_batch
         holdings = self.portfolio.get("holdings", {})
         if holdings:
             quotes = fetch_quotes_batch(list(holdings.keys()))

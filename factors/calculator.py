@@ -12,11 +12,15 @@
 - 技术因子: MA、RSI、MACD
 """
 
+import logging
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from factors.data_loader import get_small_cap_stocks
 from data.storage import load_stock_daily
+
+logger = logging.getLogger(__name__)
 
 
 def calc_momentum(df: pd.DataFrame, periods: list = [5, 10, 20, 60]) -> dict:
@@ -69,15 +73,15 @@ def calc_turnover_factor(df: pd.DataFrame, periods: list = [5, 20]) -> dict:
 def calc_volume_price(df: pd.DataFrame) -> dict:
     """量价因子: 量价背离、放量程度"""
     result = {}
-    if len(df) < 10:
+    if len(df) < 20:
         return {"vol_price_diverge": np.nan, "volume_surge": np.nan}
 
     # 最近5日 vs 之前15日的量价关系
     recent_ret = df["close"].iloc[-5:].pct_change().dropna().mean()
-    prior_ret = df["close"].iloc[-20:-5].pct_change().dropna().mean() if len(df) >= 20 else 0
+    prior_ret = df["close"].iloc[-20:-5].pct_change().dropna().mean()
 
     recent_vol = df["volume"].iloc[-5:].mean()
-    prior_vol = df["volume"].iloc[-20:-5].mean() if len(df) >= 20 else df["volume"].mean()
+    prior_vol = df["volume"].iloc[-20:-5].mean()
 
     # 量价背离: 价格涨但量缩 → 可能见顶
     if recent_vol > 0 and prior_vol > 0:
@@ -317,7 +321,3 @@ def compute_stock_pool_factors(
 
     logger.info(f"因子计算完成: {len(df)} 只股票, {len(df.columns)} 个因子")
     return df
-
-
-import logging
-logger = logging.getLogger(__name__)

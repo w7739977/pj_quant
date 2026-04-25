@@ -19,91 +19,18 @@ from config.settings import (
 )
 
 
-def humanize_reason(reason: str, name: str = "") -> str:
-    """将技术指标 reason 翻译成通俗中文"""
-    if not reason:
-        return ""
+def humanize_reason(reason: str, name: str = "", reason_data: dict = None) -> str:
+    """
+    将技术指标 reason 翻译成通俗中文
 
-    # 卖出理由已经是中文
-    if any(kw in reason for kw in ["止损", "止盈", "超时调仓", "调仓换股"]):
-        return reason
-
-    parts = []
-
-    # 排名
-    factor_match = re.search(r"因子#(\d+)", reason)
-    ml_match = re.search(r"ML#(\d+)", reason)
-    both = "★双重确认" in reason
-
-    if factor_match and ml_match:
-        fr, mr = int(factor_match.group(1)), int(ml_match.group(1))
-        if both:
-            parts.append("多因子和ML模型均排名靠前，信号强烈")
-        elif fr <= 20:
-            parts.append(f"多因子排名第{fr}，技术面优势明显")
-        elif mr <= 20:
-            parts.append(f"ML模型预测排名第{mr}，看好后续走势")
-        else:
-            parts.append(f"多因子第{fr}、ML第{mr}")
-
-    # 因子翻译
-    factor_labels = {
-        "mom_20d": True,
-        "pe_ttm": False,
-        "pb": False,
-    }
-    for key, is_pct in factor_labels.items():
-        m = re.search(rf"{key}:([+-]?\d+\.?\d*%?)", reason)
-        if m:
-            val = m.group(1)
-            if key == "pe_ttm":
-                try:
-                    v = float(val)
-                    if v < 0:
-                        parts.append("亏损股")
-                    elif v < 15:
-                        parts.append(f"低估值(PE仅{v:.0f})")
-                    elif v > 50:
-                        parts.append(f"估值偏高(PE={v:.0f})")
-                except ValueError:
-                    pass
-            elif key == "pb":
-                try:
-                    v = float(val)
-                    if v < 1:
-                        parts.append(f"破净(PB={v:.1f})")
-                    elif v < 3:
-                        parts.append(f"估值合理(PB={v:.1f})")
-                except ValueError:
-                    pass
-            elif key == "mom_20d":
-                try:
-                    v = float(val.replace("%", ""))
-                    if v > 15:
-                        parts.append(f"短期强势(20日涨{v:.0f}%)")
-                    elif v > 5:
-                        parts.append(f"温和上涨(20日涨{v:.0f}%)")
-                    elif v < -10:
-                        parts.append(f"短期弱势(20日跌{abs(v):.0f}%)")
-                except ValueError:
-                    pass
-
-    # ML预测
-    pred_match = re.search(r"预测20日收益:([+-]?\d+\.?\d*%?)", reason)
-    if pred_match:
-        try:
-            v = float(pred_match.group(1).replace("%", ""))
-            if v > 3:
-                parts.append(f"模型预测看涨(+{v:.0f}%)")
-            elif v < -3:
-                parts.append(f"模型预测有风险({v:.0f}%)")
-        except ValueError:
-            pass
-
-    if parts:
-        prefix = f"{name}：" if name else ""
-        return f"{prefix}{'，'.join(parts)}"
-    return reason
+    优先使用结构化 reason_data（dict），无则降级用正则解析 reason 字符串
+    """
+    from portfolio.reason_text import humanize_reason as _humanize
+    return _humanize(
+        reason_data or {},
+        name=name,
+        fallback_reason=reason,
+    )
 
 # 可交易代码前缀（正则）
 _TRADEABLE_RE = re.compile(r"^(000|001|002|003|300|600|601|603|605)\d{3}$")
