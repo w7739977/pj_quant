@@ -65,11 +65,11 @@ def _check_limit(code: str, price: float, prev_close: float) -> tuple:
     if prev_close <= 0 or price <= 0:
         return False, False
 
-    if code.startswith("688"):
+    if code.startswith("688") or code.startswith("300"):  # 科创板 + 创业板 20%
         limit_pct = 0.20
-    elif code.startswith(("8", "4")):
+    elif code.startswith(("8", "4")):                     # 北交所 30%
         limit_pct = 0.30
-    else:
+    else:                                                  # 沪深主板 10%
         limit_pct = 0.10
 
     is_limit_up = price >= prev_close * (1 + limit_pct - 0.001)

@@ -109,7 +109,8 @@ def format_checklist(sell_actions: list, buy_actions: list, summary: dict) -> st
                 f" = {a['amount']:,.0f}元"
             )
             pnl_str = f"{a['pnl']:+,.0f}元 ({a['pnl_pct']:+.1f}%)"
-            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''),
+                                         reason_data=a.get('reason_data'))
             lines.append(f"     盈亏: {pnl_str} {reason_str}")
 
     if buy_actions:
@@ -123,7 +124,7 @@ def format_checklist(sell_actions: list, buy_actions: list, summary: dict) -> st
                 f" = {a['amount']:,.0f}元"
             )
             if a.get("reason"):
-                lines.append(f"     {humanize_reason(a['reason'], a.get('name', ''))}")
+                lines.append(f"     {humanize_reason(a['reason'], a.get('name', ''), reason_data=a.get('reason_data'))}")
 
     if not sell_actions and not buy_actions:
         lines.append("")
@@ -149,7 +150,8 @@ def format_push_message(sell_actions: list, buy_actions: list, summary: dict) ->
         lines.append("**卖出:**")
         for a in sell_actions:
             pnl = f"{a['pnl']:+,.0f}({a['pnl_pct']:+.1f}%)"
-            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''),
+                                         reason_data=a.get('reason_data'))
             lines.append(
                 f"- {a.get('name', '')}({a['code']})"
                 f" {a['shares']}股@{a['price']:.2f}"
@@ -159,7 +161,8 @@ def format_push_message(sell_actions: list, buy_actions: list, summary: dict) ->
     if buy_actions:
         lines.append("**买入:**")
         for a in buy_actions:
-            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''),
+                                         reason_data=a.get('reason_data'))
             line = (
                 f"- {a.get('name', '')}({a['code']})"
                 f" {a['shares']}股({a['shares']//100}手)"

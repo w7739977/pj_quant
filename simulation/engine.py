@@ -403,15 +403,14 @@ class SimEngine:
                         print(f"  [止损/止盈触发] {code} {stop_order.reason}"
                               f" @ {stop_order.filled_price:.2f}")
 
-    def _get_order_reason_data(self, order) -> str:
-        """从计划中获取订单对应的 reason_data（JSON 字符串）"""
-        import json as _json
+    def _get_order_reason_data(self, order) -> dict:
+        """从计划中获取订单对应的 reason_data（dict）"""
         for buy in self.daily_plan.get("buys", []):
             if buy.get("code") == order.symbol:
                 rd = buy.get("reason_data")
                 if rd:
-                    return _json.dumps(rd, ensure_ascii=False) if isinstance(rd, dict) else str(rd)
-        return ""
+                    return rd if isinstance(rd, dict) else {}
+        return {}
 
     def _execute_order(self, order, quote: dict):
         """执行已成交的订单，更新持仓"""
@@ -824,6 +823,7 @@ class SimEngine:
                         "price": p["price"],
                         "amount": p["amount"],
                         "reason": p.get("reason", ""),
+                        "reason_data": p.get("reason_data"),
                     })
             except Exception as e:
                 logger.warning(f"选股失败: {e}")

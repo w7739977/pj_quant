@@ -78,13 +78,15 @@ def _get_conn() -> sqlite3.Connection:
 
 def load_sim_portfolio() -> dict:
     """加载模拟持仓"""
+    from config.settings import INITIAL_CAPITAL
+    default = {"cash": float(INITIAL_CAPITAL), "holdings": {}}
     if not os.path.exists(_PORTFOLIO_PATH):
-        return {"cash": 20000.0, "holdings": {}}
+        return default
     try:
         with open(_PORTFOLIO_PATH, "r") as f:
             return json.load(f)
     except Exception:
-        return {"cash": 20000.0, "holdings": {}}
+        return default
 
 
 def save_sim_portfolio(portfolio: dict) -> None:
@@ -132,8 +134,13 @@ def update_order_status(order) -> None:
 def save_trade(symbol: str, name: str, side: str, shares: int,
                price: float, amount: float, fee: float, *,
                profit: float = 0.0, reason: str = "",
-               order_id: int = 0, reason_data: str = "") -> None:
+               order_id: int = 0, reason_data=None) -> None:
     """写入成交记录"""
+    # reason_data: 统一序列化为 JSON 字符串
+    if isinstance(reason_data, dict):
+        reason_data = json.dumps(reason_data, ensure_ascii=False)
+    elif not reason_data:
+        reason_data = "{}"
     conn = _get_conn()
     try:
         conn.execute(
