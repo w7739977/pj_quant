@@ -252,11 +252,11 @@ def check_holdings(tracker, stop_loss_pct: float = -0.08,
             reason = "止盈"
         elif buy_date:
             try:
-                buy_dt = datetime.strptime(buy_date, "%Y-%m-%d")
-                days_held = (today - buy_dt).days
+                from simulation.matcher import _calc_trade_days
+                days_held = _calc_trade_days(buy_date)
                 if days_held >= max_holding_days and abs(pnl_pct) < 0.03:
-                    reason = f"超时调仓(持有{days_held}日)"
-            except ValueError:
+                    reason = f"超时调仓(持有{days_held}交易日)"
+            except Exception:
                 pass
 
         if reason:
@@ -488,6 +488,19 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             "amount": amount,
             "cost": cost,
             "reason": reason,
+            "reason_data": {
+                "factor_rank": factor_rank,
+                "ml_rank": ml_rank,
+                "in_both": bool(row["in_both"]),
+                "key_factors": {
+                    "mom_20d": row.get("mom_20d"),
+                    "pe_ttm": row.get("pe_ttm"),
+                    "pb": row.get("pb"),
+                    "turnover_rate": row.get("turnover_rate"),
+                    "vol_10d": row.get("vol_10d"),
+                },
+                "predicted_return": pred_row.iloc[0].get("predicted_return") if not pred_row.empty else None,
+            },
             "final_score": round(float(row["final_score"]), 2),
             "dimension_scores": {
                 "技术面": row.get("技术面_score", None),
@@ -600,7 +613,8 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
     slots = max(0, NUM_POSITIONS - current_holdings)
 
     buy_actions = []
-    if slots > 0 and available_cash >= 5000:
+    from config.settings import MIN_BUY_CAPITAL
+    if slots > 0 and available_cash >= MIN_BUY_CAPITAL:
         exclude_codes = list(tracker.holdings.keys())
         buy_actions = get_stock_picks_live(
             stock_capital=available_cash,
@@ -698,33 +712,13 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
     }
 
 
-def _simulate_execution_live(tracker, sell_actions: list, buy_actions: list):
-    """模拟执行操作清单，更新虚拟持仓"""
-    from portfolio.trade_utils import estimate_buy_cost, estimate_sell_cost
-
-    # 先卖后买
-    for a in sell_actions:
-        price = a["price"]
-        amount = price * a["shares"]
-        cost = estimate_sell_cost(amount)
-        tracker.update_after_sell(a["code"], price, cost)
-        print(f"  [模拟卖出] {a['code']} {a['shares']}股 @ {price:.2f}")
-
-    for a in buy_actions:
-        price = a["price"]
-        shares = a["shares"]
-        cost = a.get("cost", estimate_buy_cost(price * shares))
-        tracker.update_after_buy(a["code"], shares, price, cost)
-        print(f"  [模拟买入] {a['code']} {shares}股 @ {price:.2f}")
-
-
 # ============ 保留原有 deploy 命令 ============
 
 def run_deploy(push: bool = False, simulate: bool = False) -> dict:
     """
     生成今日完整操作清单（标准模式：ETF + 个股）
     """
-    from config.settings import INITIAL_CAPITAL, ETF_POOL
+    from config.settings import INITIAL_CAPITAL, ETF_POOL, MIN_BUY_CAPITAL
     from portfolio.tracker import PortfolioTracker
 
     print("\n" + "=" * 60)
@@ -772,7 +766,7 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
     # 3b. 个股推荐
     print("  个股精选...")
     stock_picks = []
-    if alloc["stock_capital"] >= 5000:
+    if alloc["stock_capital"] >= MIN_BUY_CAPITAL:
         stock_picks = get_stock_picks(alloc["stock_capital"], top_n=5)
 
     # ============ 生成操作清单 ============
@@ -839,8 +833,8 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
 
     # ============ 模拟执行 ============
     if simulate:
-        _simulate_execution(tracker, actions, alloc)
-        print("\n虚拟持仓已更新")
+        # standard deploy --simulate 已弃用，请使用 live --simulate
+        print("\n  提示: standard deploy --simulate 已弃用，请使用 live --simulate")
 
     # ============ 推送 ============
     if push:
@@ -853,18 +847,6 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
         "actions": actions,
         "stock_picks": stock_picks,
     }
-
-
-def _simulate_execution(tracker, actions: list, alloc: dict):
-    """模拟执行操作清单，更新虚拟持仓"""
-    for a in actions:
-        if a["action"] == "买入" and a["code"] != "当前持仓":
-            tracker.update_after_buy(
-                a["code"],
-                shares=1,
-                price=a["amount"],
-                cost=0,
-            )
 
 
 def _push_deploy_report(actions, alloc, sent_score, top_news, deep):

@@ -10,8 +10,13 @@ A股交易规则:
   - 100股整手
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime
+from typing import Optional
+
+import chinese_calendar
 from portfolio.trade_utils import is_tradeable, calc_shares, estimate_buy_cost, estimate_sell_cost
 
 logger = logging.getLogger(__name__)
@@ -21,7 +26,7 @@ DEFAULT_SLIPPAGE = 0.01
 
 
 def _calc_days(buy_date: str) -> int:
-    """计算持有天数"""
+    """计算持有天数（日历日）"""
     if not buy_date:
         return 0
     try:
@@ -29,6 +34,47 @@ def _calc_days(buy_date: str) -> int:
         return (datetime.now() - buy_dt).days
     except ValueError:
         return 0
+
+
+def _calc_trade_days(buy_date: str) -> int:
+    """计算持有交易日数（排除周末和法定节假日）"""
+    if not buy_date:
+        return 0
+    try:
+        buy_dt = datetime.strptime(buy_date, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        if buy_dt >= today:
+            return 0
+        workdays = chinese_calendar.get_workdays(buy_dt, today)
+        # get_workdays returns a list of dates; exclude buy_date itself
+        if isinstance(workdays, list):
+            return max(0, len(workdays) - 1)
+        return int(workdays) - 1 if workdays > 0 else 0
+    except Exception:
+        return _calc_days(buy_date)
+
+
+def _check_limit(code: str, price: float, prev_close: float) -> tuple:
+    """
+    判断涨跌停状态
+
+    Returns
+    -------
+    (is_limit_up, is_limit_down)
+    """
+    if prev_close <= 0 or price <= 0:
+        return False, False
+
+    if code.startswith("688"):
+        limit_pct = 0.20
+    elif code.startswith(("8", "4")):
+        limit_pct = 0.30
+    else:
+        limit_pct = 0.10
+
+    is_limit_up = price >= prev_close * (1 + limit_pct - 0.001)
+    is_limit_down = price <= prev_close * (1 - limit_pct + 0.001)
+    return is_limit_up, is_limit_down
 
 
 class Order:
@@ -92,19 +138,19 @@ class Matcher:
 
     def _match_buy(self, order: Order, quote: dict) -> Order:
         """买入撮合"""
-        ask1 = quote.get("ask1", 0)
+        price = quote.get("price", 0)
+        prev_close = quote.get("prev_close", 0)
 
-        # 涨停检查: ask1 <= 0 表示涨停，无法买入
+        # 涨停检查
+        is_limit_up, _ = _check_limit(order.symbol, price, prev_close)
+        if is_limit_up:
+            order.status = "rejected"
+            order.reason += " [涨停]"
+            return order
+
+        ask1 = quote.get("ask1", 0)
         if ask1 <= 0:
-            # 用当前价判断是否真的涨停
-            high = quote.get("high", 0)
-            prev_close = quote.get("prev_close", 0)
-            if prev_close > 0 and high >= prev_close * 1.099:
-                order.status = "rejected"
-                order.reason += " [涨停]"
-                return order
-            # 没有ask1数据，用当前价
-            ask1 = quote["price"]
+            ask1 = price
 
         fill_price = ask1 + self.slippage
 
@@ -121,17 +167,19 @@ class Matcher:
 
     def _match_sell(self, order: Order, quote: dict) -> Order:
         """卖出撮合"""
-        bid1 = quote.get("bid1", 0)
+        price = quote.get("price", 0)
+        prev_close = quote.get("prev_close", 0)
 
-        # 跌停检查: bid1 <= 0 表示跌停，无法卖出
+        # 跌停检查
+        _, is_limit_down = _check_limit(order.symbol, price, prev_close)
+        if is_limit_down:
+            order.status = "rejected"
+            order.reason += " [跌停]"
+            return order
+
+        bid1 = quote.get("bid1", 0)
         if bid1 <= 0:
-            low = quote.get("low", 0)
-            prev_close = quote.get("prev_close", 0)
-            if prev_close > 0 and low <= prev_close * 0.901:
-                order.status = "rejected"
-                order.reason += " [跌停]"
-                return order
-            bid1 = quote["price"]
+            bid1 = price
 
         fill_price = bid1 - self.slippage
 
@@ -150,7 +198,7 @@ class Matcher:
                         buy_date: str, quote: dict,
                         stop_loss_pct: float = -0.08,
                         take_profit_pct: float = 0.15,
-                        max_holding_days: int = 20) -> Order | None:
+                        max_holding_days: int = 20) -> Optional[Order]:
         """
         实时止损/止盈/超时检查
 
@@ -167,17 +215,13 @@ class Matcher:
         reason = ""
 
         if pnl_pct <= stop_loss_pct:
-            reason = f"止损({pnl_pct:+.1%}, 持有{_calc_days(buy_date)}日, {pnl_amount:+,.0f}元)"
+            reason = f"止损({pnl_pct:+.1%}, 持有{_calc_trade_days(buy_date)}交易日, {pnl_amount:+,.0f}元)"
         elif pnl_pct >= take_profit_pct:
-            reason = f"止盈({pnl_pct:+.1%}, 持有{_calc_days(buy_date)}日, {pnl_amount:+,.0f}元)"
+            reason = f"止盈({pnl_pct:+.1%}, 持有{_calc_trade_days(buy_date)}交易日, {pnl_amount:+,.0f}元)"
         elif buy_date:
-            try:
-                buy_dt = datetime.strptime(buy_date, "%Y-%m-%d")
-                days = (datetime.now() - buy_dt).days
-                if days >= max_holding_days and abs(pnl_pct) < 0.03:
-                    reason = f"超时调仓(持有{days}日, 收益{pnl_pct:+.1%}, {pnl_amount:+,.0f}元)"
-            except ValueError:
-                pass
+            trade_days = _calc_trade_days(buy_date)
+            if trade_days >= max_holding_days and abs(pnl_pct) < 0.03:
+                reason = f"超时调仓(持有{trade_days}交易日, 收益{pnl_pct:+.1%}, {pnl_amount:+,.0f}元)"
 
         if not reason:
             return None
@@ -191,54 +235,6 @@ class Matcher:
             return True
         today = datetime.now().strftime("%Y-%m-%d")
         return buy_date < today
-
-
-def fetch_quote_with_depth(symbol: str) -> dict:
-    """
-    获取含五档盘口的行情（新浪接口）
-
-    Returns
-    -------
-    dict: {price, bid1, ask1, bid1_vol, ask1_vol, high, low, prev_close, name, volume}
-    """
-    from data.fetcher import fetch_realtime_sina
-    df = fetch_realtime_sina([symbol])
-    if df.empty:
-        # 降级到腾讯接口（无盘口）
-        from data.fetcher import fetch_realtime_tencent
-        rt = fetch_realtime_tencent(symbol)
-        if rt:
-            return {
-                "price": rt.get("price", 0),
-                "bid1": rt.get("price", 0),
-                "ask1": rt.get("price", 0),
-                "bid1_vol": 0, "ask1_vol": 0,
-                "high": rt.get("high", 0),
-                "low": rt.get("low", 0),
-                "prev_close": rt.get("prev_close", 0),
-                "name": rt.get("name", ""),
-                "volume": rt.get("volume", 0),
-            }
-        return {}
-
-    row = df.iloc[0]
-    price = float(row.get("price", 0))
-    prev_close = float(row.get("prev_close", 0))
-
-    # 新浪返回的数据不含五档字段名，需要手动解析
-    # 这里先返回基本数据，bid1/ask1 用当前价模拟
-    return {
-        "price": price,
-        "bid1": price,
-        "ask1": price,
-        "bid1_vol": 0,
-        "ask1_vol": 0,
-        "high": float(row.get("high", 0)),
-        "low": float(row.get("low", 0)),
-        "prev_close": prev_close,
-        "name": row.get("name", ""),
-        "volume": float(row.get("volume", 0)),
-    }
 
 
 def fetch_quotes_batch(symbols: list) -> dict:
@@ -256,16 +252,20 @@ def fetch_quotes_batch(symbols: list) -> dict:
         for _, row in rt_df.iterrows():
             code = row["code"]
             price = float(row.get("price", 0))
+            prev_close = float(row.get("prev_close", 0)) if "prev_close" in row else 0
+            is_limit_up, is_limit_down = _check_limit(code, price, prev_close)
             result[code] = {
                 "price": price,
                 "bid1": price,
                 "ask1": price,
                 "high": float(row.get("high", 0)) if "high" in row else 0,
                 "low": float(row.get("low", 0)) if "low" in row else 0,
-                "prev_close": float(row.get("prev_close", 0)) if "prev_close" in row else 0,
+                "prev_close": prev_close,
                 "name": row.get("name", ""),
                 "volume": float(row.get("volume", 0)),
                 "change_pct": float(row.get("change_pct", 0)),
+                "is_limit_up": is_limit_up,
+                "is_limit_down": is_limit_down,
             }
         return result
     except Exception as e:
