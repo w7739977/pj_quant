@@ -3,11 +3,14 @@
 """
 
 import sqlite3
+import fcntl
 import pandas as pd
 import os
 import logging
 
 from config.settings import DB_PATH
+
+_LOCK_PATH = os.path.join(os.path.dirname(DB_PATH), ".portfolio.lock")
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +96,19 @@ def save_backtest_result(df: pd.DataFrame, strategy_name: str):
 
 
 def save_portfolio(state: dict):
-    """保存持仓状态"""
-    conn = get_connection()
-    import json
-    save_state = dict(state)
-    save_state["holdings"] = json.dumps(state.get("holdings", {}), ensure_ascii=False)
-    pd.DataFrame([save_state]).to_sql("portfolio", conn, if_exists="replace", index=False)
-    conn.close()
+    """保存持仓状态（文件锁防并发）"""
+    os.makedirs(os.path.dirname(_LOCK_PATH), exist_ok=True)
+    with open(_LOCK_PATH, "w") as lock_fp:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX)
+        try:
+            conn = get_connection()
+            import json
+            save_state = dict(state)
+            save_state["holdings"] = json.dumps(state.get("holdings", {}), ensure_ascii=False)
+            pd.DataFrame([save_state]).to_sql("portfolio", conn, if_exists="replace", index=False)
+            conn.close()
+        finally:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
 
 
 def load_portfolio() -> dict:
@@ -116,7 +125,8 @@ def load_portfolio() -> dict:
         pass
     finally:
         conn.close()
-    return {"cash": 20000.0, "holdings": {}, "total_value": 20000.0}
+    from config.settings import INITIAL_CAPITAL
+    return {"cash": float(INITIAL_CAPITAL), "holdings": {}, "total_value": float(INITIAL_CAPITAL)}
 
 
 def save_stock_daily(df: pd.DataFrame, symbol: str):

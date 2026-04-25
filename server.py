@@ -13,6 +13,8 @@ API:
 import sys
 import os
 import json
+import html
+import hashlib
 import argparse
 from datetime import datetime
 
@@ -25,7 +27,13 @@ from typing import List, Optional
 
 app = FastAPI(title="pj_quant 持仓同步")
 
-WEB_TOKEN = os.getenv("WEB_TOKEN", "pj_quant_2026")
+# a) 强制 WEB_TOKEN，不允许弱默认值
+WEB_TOKEN = os.environ.get("WEB_TOKEN")
+if not WEB_TOKEN:
+    raise RuntimeError(
+        "WEB_TOKEN env 未设置。请生成强随机 token 后通过环境变量传入：\n"
+        "  WEB_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') python3 server.py"
+    )
 
 
 # ============ 鉴权 ============
@@ -46,10 +54,12 @@ class BuyItem(BaseModel):
 class SellItem(BaseModel):
     code: str
     price: float
+    shares: Optional[int] = None  # None=清仓, 指定则部分减仓
 
 class SyncBody(BaseModel):
     executed_buys: List[BuyItem] = []
     executed_sells: List[SellItem] = []
+    client_request_id: str = ""
 
 
 # ============ API ============
@@ -159,30 +169,52 @@ def _do_sync(body: SyncBody) -> dict:
     from portfolio.tracker import PortfolioTracker
     from portfolio.trade_utils import estimate_buy_cost, estimate_sell_cost
 
+    # b) 幂等性: 用 client_request_id 或请求体指纹去重
+    request_key = body.client_request_id or hashlib.sha256(
+        json.dumps(body.model_dump(), sort_keys=True, default=str).encode()
+    ).hexdigest()[:32]
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    sync_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "sync")
+    os.makedirs(sync_dir, exist_ok=True)
+    idempotent_path = os.path.join(sync_dir, f"idempotent_{today}.json")
+
+    # 检查是否已处理
+    processed = {}
+    if os.path.exists(idempotent_path):
+        try:
+            with open(idempotent_path, "r") as f:
+                processed = json.load(f)
+        except Exception:
+            pass
+
+    if request_key in processed:
+        prev = processed[request_key]
+        return {"idempotent": True, "previous_result": prev}
+
     tracker = PortfolioTracker()
     errors = []
     results = []
 
-    # 记录同步
-    today = datetime.now().strftime("%Y-%m-%d")
-    sync_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "sync")
-    os.makedirs(sync_dir, exist_ok=True)
-    sync_path = os.path.join(sync_dir, f"{today}.json")
-
-    warning = None
-    if os.path.exists(sync_path):
-        warning = "今日已有同步记录，本次为追加操作"
-
-    # 先卖后买
+    # e) 先卖后买（支持部分减仓）
     for item in body.executed_sells:
         try:
-            shares = tracker.holdings.get(item.code, {}).get("shares", 0)
-            cost = estimate_sell_cost(item.price * shares)
-            ok = tracker.update_after_sell(item.code, item.price, cost)
-            if ok:
-                results.append(f"卖出 {item.code} {shares}股@{item.price:.2f}")
+            sell_shares = item.shares if item.shares else tracker.holdings.get(item.code, {}).get("shares", 0)
+            cost = estimate_sell_cost(item.price * sell_shares)
+            if item.shares and item.shares < tracker.holdings.get(item.code, {}).get("shares", 0):
+                # 部分减仓: 手动扣减
+                holding = tracker.holdings[item.code]
+                holding["shares"] -= item.shares
+                tracker.state["cash"] += item.price * item.shares - cost
+                from data.storage import save_portfolio
+                save_portfolio(tracker.state)
+                results.append(f"部分卖出 {item.code} {item.shares}股@{item.price:.2f}")
             else:
-                errors.append(f"卖出 {item.code} 失败: 不在持仓中")
+                ok = tracker.update_after_sell(item.code, item.price, cost)
+                if ok:
+                    results.append(f"卖出 {item.code} {sell_shares}股@{item.price:.2f}")
+                else:
+                    errors.append(f"卖出 {item.code} 失败: 不在持仓中")
         except Exception as e:
             errors.append(f"卖出 {item.code} 异常: {e}")
 
@@ -195,8 +227,10 @@ def _do_sync(body: SyncBody) -> dict:
             errors.append(f"买入 {item.code} 异常: {e}")
 
     # 保存同步记录
+    sync_path = os.path.join(sync_dir, f"{today}.json")
     sync_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "request_key": request_key,
         "buys": [item.model_dump() for item in body.executed_buys],
         "sells": [item.model_dump() for item in body.executed_sells],
         "results": results,
@@ -205,14 +239,18 @@ def _do_sync(body: SyncBody) -> dict:
     with open(sync_path, "w", encoding="utf-8") as f:
         json.dump(sync_record, f, ensure_ascii=False, indent=2)
 
+    # 幂等记录
     response = {
         "success": len(errors) == 0,
         "results": results,
         "errors": errors,
         "status": _get_status(),
+        "request_key": request_key,
     }
-    if warning:
-        response["warning"] = warning
+    processed[request_key] = response
+    with open(idempotent_path, "w") as f:
+        json.dump(processed, f, ensure_ascii=False, indent=2)
+
     return response
 
 
@@ -228,7 +266,8 @@ def _get_preview() -> dict:
     if slots == 0:
         return {"message": "仓位已满，无可用槽位", "picks": []}
 
-    if tracker.cash < 5000:
+    from config.settings import MIN_BUY_CAPITAL
+    if tracker.cash < MIN_BUY_CAPITAL:
         return {"message": f"可用资金不足 ({tracker.cash:,.0f}元)", "picks": []}
 
     try:
@@ -255,7 +294,7 @@ def _render_homepage() -> str:
         pnl_cls = "profit" if h["pnl"] >= 0 else "loss"
         holding_rows += f"""
         <tr>
-            <td>{code}</td>
+            <td>{html.escape(code)}</td>
             <td>{h['shares']}</td>
             <td>{h['avg_cost']:.3f}</td>
             <td>{h['current_price'] or '-'}</td>
@@ -266,8 +305,8 @@ def _render_homepage() -> str:
     sell_checks = ""
     for s in sell_signals:
         sell_checks += f"""
-        <label><input type="checkbox" data-action="sell" data-code="{s['code']}" data-price="0"> 
-        卖出 {s['code']} ({s.get('reason', '')})</label><br>"""
+        <label><input type="checkbox" data-action="sell" data-code="{html.escape(s['code'])}" data-price="0">
+        卖出 {html.escape(s['code'])} ({html.escape(s.get('reason', ''))})</label><br>"""
 
     # 今日建议 - 买入
     buy_checks = ""
@@ -275,8 +314,8 @@ def _render_homepage() -> str:
         price_val = b.get('price', 0) or 0
         shares_val = b.get('shares', 0) or 0
         buy_checks += f"""
-        <label><input type="checkbox" data-action="buy" data-code="{b['code']}" data-shares="{shares_val}" data-price="{price_val}"> 
-        买入 {b['code']} {shares_val}股@{price_val:.2f} ({b.get('reason', '')})</label><br>"""
+        <label><input type="checkbox" data-action="buy" data-code="{html.escape(b['code'])}" data-shares="{shares_val}" data-price="{price_val}">
+        买入 {html.escape(b['code'])} {shares_val}股@{price_val:.2f} ({html.escape(b.get('reason', ''))})</label><br>"""
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
