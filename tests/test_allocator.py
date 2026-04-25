@@ -83,10 +83,11 @@ class TestTimeoutTrigger:
     """超时调仓（持有超20日且盈亏<3%）"""
 
     @patch("data.fetcher.fetch_realtime_tencent_batch")
-    def test_timeout_triggered(self, mock_fetch):
+    @patch("simulation.matcher._calc_trade_days", return_value=25)
+    def test_timeout_triggered(self, mock_trade_days, mock_fetch):
         from portfolio.allocator import check_holdings
 
-        # 35天前买入（≈25交易日），成本10元，当前10.1元 = +1% → 超时调仓
+        # _calc_trade_days mock 返回 25（>20），成本10元，当前10.1元 = +1% → 超时调仓
         buy_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
         tracker = _mock_tracker({
             "000001": {"shares": 100, "avg_cost": 10.0, "buy_date": buy_date}
@@ -98,10 +99,11 @@ class TestTimeoutTrigger:
         assert "超时调仓" in actions[0]["reason"]
 
     @patch("data.fetcher.fetch_realtime_tencent_batch")
-    def test_timeout_not_triggered_profitable(self, mock_fetch):
+    @patch("simulation.matcher._calc_trade_days", return_value=25)
+    def test_timeout_not_triggered_profitable(self, mock_trade_days, mock_fetch):
         from portfolio.allocator import check_holdings
 
-        # 35天前买入但涨了5%（>3%），不触发超时
+        # 持有25交易日但涨了5%（>3%），不触发超时
         buy_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
         tracker = _mock_tracker({
             "000001": {"shares": 100, "avg_cost": 10.0, "buy_date": buy_date}

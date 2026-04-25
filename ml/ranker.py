@@ -24,7 +24,8 @@ from factors.calculator import compute_stock_pool_factors
 
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = "ml/models"
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(_PROJECT_ROOT, "ml", "models")
 FEATURE_COLS = [
     "mom_5d", "mom_10d", "mom_20d", "mom_60d",
     "vol_10d", "vol_20d",

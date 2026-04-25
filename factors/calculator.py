@@ -23,8 +23,10 @@ from data.storage import load_stock_daily
 logger = logging.getLogger(__name__)
 
 
-def calc_momentum(df: pd.DataFrame, periods: list = [5, 10, 20, 60]) -> dict:
+def calc_momentum(df: pd.DataFrame, periods: list = None) -> dict:
     """动量因子: 过去N日涨幅"""
+    if periods is None:
+        periods = [5, 10, 20, 60]
     result = {}
     close = df["close"].values
     for p in periods:
@@ -35,8 +37,10 @@ def calc_momentum(df: pd.DataFrame, periods: list = [5, 10, 20, 60]) -> dict:
     return result
 
 
-def calc_volatility(df: pd.DataFrame, periods: list = [10, 20]) -> dict:
+def calc_volatility(df: pd.DataFrame, periods: list = None) -> dict:
     """波动率因子: 过去N日日收益率标准差"""
+    if periods is None:
+        periods = [10, 20]
     result = {}
     returns = df["close"].pct_change().dropna()
     for p in periods:
@@ -47,8 +51,10 @@ def calc_volatility(df: pd.DataFrame, periods: list = [10, 20]) -> dict:
     return result
 
 
-def calc_turnover_factor(df: pd.DataFrame, periods: list = [5, 20]) -> dict:
+def calc_turnover_factor(df: pd.DataFrame, periods: list = None) -> dict:
     """换手率因子: 平均换手率、换手率变化"""
+    if periods is None:
+        periods = [5, 20]
     result = {}
     turnover = df.get("turnover", pd.Series(dtype=float))
     if len(turnover) == 0:

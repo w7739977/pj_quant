@@ -21,20 +21,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _last_trade_date() -> str:
-    """推算上一个交易日的日期（简单处理：周一→上周五，其他→昨天）"""
-    today = datetime.now()
-    if today.weekday() == 0:  # 周一
-        return (today - timedelta(days=3)).strftime("%Y-%m-%d")
-    elif today.weekday() >= 5:  # 周末
-        days_back = today.weekday() - 4  # 周六→2, 周日→3
-        return (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
-    else:
-        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    """推算上一个交易日（用 chinese_calendar 感知法定节假日）"""
+    import chinese_calendar
+    d = datetime.now().date() - timedelta(days=1)
+    while not chinese_calendar.is_workday(d):
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
 
 
 def check_data_freshness() -> dict:
     """检查1: 数据新鲜度"""
     from data.storage import list_cached_stocks, load_stock_daily
+
+    random.seed(datetime.now().strftime("%Y%m%d"))
 
     stocks = list_cached_stocks()
     if not stocks:
@@ -124,6 +123,8 @@ def check_data_completeness() -> dict:
     - pb / turnover_rate 天然 ~97-100%，阈值 80%
     """
     from data.storage import list_cached_stocks, load_stock_daily
+
+    random.seed(datetime.now().strftime("%Y%m%d"))
 
     stocks = list_cached_stocks()
     if not stocks:

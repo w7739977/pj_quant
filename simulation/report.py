@@ -617,11 +617,11 @@ def _calc_stats(snapshots: list, sells: list) -> dict:
         dd = (peak - tv) / peak if peak > 0 else 0
         max_dd = max(max_dd, dd)
 
-    # 夏普比率（简化：假设无风险利率0，日收益年化）
+    # 夏普比率（与 backtest 统一口径）
     if len(daily_returns) > 1:
         import numpy as np
-        arr = np.array(daily_returns)
-        sharpe = float(arr.mean() / arr.std() * (252 ** 0.5)) if arr.std() > 0 else 0
+        from analytics.perf import sharpe_ratio
+        sharpe = sharpe_ratio(np.array(daily_returns))
     else:
         sharpe = 0
 
