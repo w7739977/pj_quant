@@ -40,6 +40,7 @@ NUM_POSITIONS = 5
 STOP_LOSS_PCT = -0.08
 TAKE_PROFIT_PCT = 0.15
 MAX_HOLDING_DAYS = 20
+MIN_BUY_CAPITAL = 5000  # 单次买入触发的最低可用资金
 
 # ============ PushPlus 微信推送 ============
 PUSHPLUS_TOKEN = "6f113b0c12f84755bb5659319a6ea2c7"

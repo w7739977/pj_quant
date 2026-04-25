@@ -86,8 +86,8 @@ class TestTimeoutTrigger:
     def test_timeout_triggered(self, mock_fetch):
         from portfolio.allocator import check_holdings
 
-        # 25天前买入，成本10元，当前10.1元 = +1% → 超时调仓
-        buy_date = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
+        # 35天前买入（≈25交易日），成本10元，当前10.1元 = +1% → 超时调仓
+        buy_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
         tracker = _mock_tracker({
             "000001": {"shares": 100, "avg_cost": 10.0, "buy_date": buy_date}
         })
@@ -101,8 +101,8 @@ class TestTimeoutTrigger:
     def test_timeout_not_triggered_profitable(self, mock_fetch):
         from portfolio.allocator import check_holdings
 
-        # 25天前买入但涨了5%（>3%），不触发超时
-        buy_date = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
+        # 35天前买入但涨了5%（>3%），不触发超时
+        buy_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
         tracker = _mock_tracker({
             "000001": {"shares": 100, "avg_cost": 10.0, "buy_date": buy_date}
         })
