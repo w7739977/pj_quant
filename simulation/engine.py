@@ -30,10 +30,7 @@ BAR_INTERVAL_SECONDS = 180  # 3分钟轮询
 
 
 def is_trading_day() -> bool:
-    """判断今天是否真实交易日（排除周末和中国法定节假日）
-
-    用于盘中撮合、日报推送等需要真实行情的场景。
-    """
+    """判断今天是否交易日（排除周末和中国法定节假日）"""
     try:
         import chinese_calendar
         return chinese_calendar.is_workday(datetime.now().date())
@@ -42,32 +39,8 @@ def is_trading_day() -> bool:
         return datetime.now().weekday() < 5
 
 
-def should_run_simulation() -> bool:
-    """是否运行模拟盘（周末跑空状态，仅法定节假日跳过）
-
-    用户云主机部署 simulated-trading 时希望周末也保持"系统在运行"，
-    所以工作日 + 普通周末都启动；仅春节/国庆等法定节假日（即使在工作日）跳过。
-    """
-    try:
-        import chinese_calendar
-        today = datetime.now().date()
-        # 工作日（含调休补班）→ 跑
-        if chinese_calendar.is_workday(today):
-            return True
-        # 非工作日：周末或法定节假日
-        # 用 detail 区分"普通周末（name=None）"和"法定节假日（name=春节等）"
-        try:
-            _, name = chinese_calendar.get_holiday_detail(today)
-            return name is None  # 普通周末跑，法定节假日跳过
-        except Exception:
-            # detail API 不可用，保守：周末跑
-            return today.weekday() >= 5
-    except Exception:
-        return True  # chinese_calendar 不可用，默认每天都跑
-
-
 def is_market_hours() -> bool:
-    """判断当前是否真实交易时间（仅工作日 + 9:30-15:00）"""
+    """判断当前是否交易时间（工作日 + 9:30-15:00）"""
     if not is_trading_day():
         return False
     now = datetime.now().strftime("%H:%M")
@@ -578,20 +551,10 @@ class SimEngine:
         启动盘中交易引擎
 
         流程: 盘前准备 → 盘中每3分钟撮合 → 收盘结算推送 → 自动退出
-        - 工作日: 完整撮合 + 收盘推送
-        - 周末: 只打印当前状态后退出（不撮合，避免污染快照）
-        - 法定节假日: 直接退出
+        必须在交易日运行，非交易日（周末/法定节假日）直接退出
         """
-        if not should_run_simulation():
-            print("今天是法定节假日，退出")
-            return
-
-        # 周末：模拟盘空跑（仅展示状态，不进入盘中循环）
         if not is_trading_day():
-            print(f"\n{'='*50}")
-            print(f"今天是周末 {datetime.now().strftime('%Y-%m-%d')}，模拟盘空跑（不撮合）")
-            print(f"{'='*50}")
-            print(self.status())
+            print("今天不是交易日，退出")
             return
 
         print(f"\n{'='*50}")
