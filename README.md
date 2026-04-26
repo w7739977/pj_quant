@@ -40,7 +40,6 @@ python main.py deploy       # 生成今日操作清单
 | `python main.py portfolio --reset` | 重置为初始状态 |
 | `python main.py deploy [--push] [--simulate]` | 标准部署（ETF+个股） |
 | `python main.py backtest` | ETF轮动策略回测 |
-| `python main.py signal [--push]` | ETF轮动信号 |
 | `python main.py smallcap` | 小盘多因子选股 |
 | `python main.py sentiment` | 市场情绪分析 |
 | `python main.py train` | 训练XGBoost模型 |
@@ -98,7 +97,6 @@ pj_quant/
 │   └── engine.py              # 回测引擎
 │
 ├── alert/
-│   ├── daily_runner.py        # 每日信号生成
 │   └── notify.py              # 微信推送（PushPlus）
 │
 ├── scripts/

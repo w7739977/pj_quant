@@ -3,7 +3,6 @@ A股量化交易系统 - 主入口
 
 用法:
   python main.py backtest           # ETF 轮动策略回测
-  python main.py signal [--push]    # 生成今日 ETF 信号 (可选推送到微信)
   python main.py smallcap           # 小市值选股推荐
   python main.py sentiment          # 市场情绪分析
   python main.py train              # 训练/更新 ML 模型
@@ -332,10 +331,6 @@ def main():
 
     if command == "backtest":
         run_backtest()
-    elif command == "signal":
-        from alert.daily_runner import run_daily_signal
-        push = "--push" in sys.argv
-        run_daily_signal(push=push)
     elif command == "smallcap":
         run_smallcap()
     elif command == "sentiment":

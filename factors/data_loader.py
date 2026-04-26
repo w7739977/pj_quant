@@ -26,7 +26,7 @@ def _safe_table_name(code: str) -> str:
 
 def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataFrame:
     """
-    获取小市值股票池（本地 SQLite total_mv 优先，腾讯 API 兜底）
+    获取小市值股票池（汇总表 → 逐表 SQL → 腾讯 API → AKShare 多级降级）
 
     Parameters
     ----------
@@ -42,7 +42,25 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
         logger.warning("本地无缓存股票，尝试 AKShare")
         return _fallback_akshare(min_cap, max_cap)
 
-    # 优先从本地 SQLite 读 total_mv
+    # M6: 优先用 latest_market_cap 汇总表（单条 SQL，毫秒级）
+    try:
+        from data.storage import query_market_cap_range, refresh_latest_market_cap
+        results = query_market_cap_range(min_cap, max_cap)
+        if not results:
+            # 表不存在或为空 → 尝试 lazy refresh 一次
+            n = refresh_latest_market_cap()
+            if n > 0:
+                results = query_market_cap_range(min_cap, max_cap)
+                logger.info(f"汇总表 lazy refresh: {n} 只")
+
+        if results:
+            stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
+            logger.info(f"汇总表 mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
+            return stock_df
+    except Exception as e:
+        logger.warning(f"汇总表查询失败: {e}")
+
+    # 退化路径：逐表 SQL（4400 次往返，2-3s）
     try:
         from config.settings import DB_PATH
         conn = sqlite3.connect(DB_PATH)
@@ -66,7 +84,7 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
 
         if results:
             stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
-            logger.info(f"本地 total_mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
+            logger.info(f"本地逐表 total_mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
             return stock_df
         else:
             logger.warning("本地 total_mv 全为空，fallback 到腾讯 API")
