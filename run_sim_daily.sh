@@ -12,18 +12,29 @@ echo "=========================================="
 echo "模拟盘启动检查 $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=========================================="
 
-# 判断是否交易日
-IS_TRADING=$(python -c "
+# 判断是否运行模拟盘（工作日 + 普通周末都跑，仅法定节假日跳过）
+SHOULD_RUN=$(python -c "
 import datetime
 try:
     import chinese_calendar
-    print('yes' if chinese_calendar.is_workday(datetime.date.today()) else 'no')
+    d = datetime.date.today()
+    if chinese_calendar.is_workday(d):
+        print('yes')
+    elif d.weekday() >= 5:
+        # 周末: 只要不叠加法定节假日就跑（如春节恰逢周末则跳过）
+        try:
+            _, name = chinese_calendar.get_holiday_detail(d)
+            print('yes' if name is None else 'no')
+        except Exception:
+            print('yes')
+    else:
+        print('no')
 except Exception:
-    print('yes' if datetime.date.today().weekday() < 5 else 'no')
+    print('yes')
 ")
 
-if [ "$IS_TRADING" != "yes" ]; then
-    echo "今天不是交易日，跳过"
+if [ "$SHOULD_RUN" != "yes" ]; then
+    echo "今天是法定节假日，跳过"
     echo ""
     exit 0
 fi
@@ -39,7 +50,7 @@ if [ -f "$PIDFILE" ]; then
     rm -f "$PIDFILE"
 fi
 
-echo "交易日，启动模拟盘引擎..."
+echo "启动模拟盘引擎..."
 echo ""
 
 # 启动引擎（盘中交易 + 收盘推送），记录PID
