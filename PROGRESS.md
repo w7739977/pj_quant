@@ -1,5 +1,34 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-25 代码 review 闭环修复（5 轮）
+
+### 背景
+
+通过 5 轮代码 review 发现并修复了从 simulation 模块缺失到 server.py 安全漏洞的 30+ 个问题，
+包括：
+- Phase 1（commit 234c42d）：补回 `simulation/trade_log.py` 缺失文件、Py3.9 类型兼容、
+  涨跌停撮合 bug、删除参数错误的 `_simulate_execution`
+- Phase 2（commit 35cb34a）：持仓时长改交易日、`humanize_reason` 重构为结构化 dict、
+  清理死代码
+- Phase 3（commit 85b6895）：抽 `MIN_BUY_CAPITAL` 常量、统一 fetch_quotes_batch import、
+  10 项一致性修复
+- Phase 4（commit 365401c）：创业板 300xxx 涨跌停限制（误判 10% 修为 20%）、
+  reason_data 数据链贯通、模拟盘默认资金读 settings
+- Phase 5（commit 0598785）：server.py 安全硬化（强制 token + 幂等性 + HTML 转义 + 文件锁）
+- Phase 6（commit bf8fad5）：抹平残留硬编码、回测按日 NAV、节假日感知、统一 Sharpe 公式
+- 收尾（commit 本轮）：幂等测试隔离 + 锁文件 gitignore
+
+### 测试
+
+`pytest tests/ -v`：64 项全过（含新增 test_matcher.py 5 个用例 + test_server.py 3 个用例）
+
+### 待跟进
+
+| 项 | 状态 |
+|----|------|
+| M4 删除/统一 alert/notify.py 旧 ETF 推送格式 | 未实施 |
+| M6 latest_market_cap 汇总表（4400 次 SQL 性能） | 未实施 |
+
 ## 2026-04-23 模拟盘决策理由增强 + 调仓换股 + 情绪分析
 
 ### 背景
