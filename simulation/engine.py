@@ -30,13 +30,19 @@ BAR_INTERVAL_SECONDS = 180  # 3分钟轮询
 
 
 def is_trading_day() -> bool:
-    """判断今天是否交易日（排除周末和中国法定节假日）"""
+    """判断今天是否 A 股交易日（排除周末 + 法定节假日 + 调休补班的周六）
+
+    注意: chinese_calendar.is_workday 在调休补班的周六返回 True（视为工作日），
+    但 A 股交易所**不**在周六/周日开盘，无论是否补班。所以这里强制叠加 weekday<5。
+    """
+    today = datetime.now().date()
+    if today.weekday() >= 5:
+        return False
     try:
         import chinese_calendar
-        return chinese_calendar.is_workday(datetime.now().date())
+        return chinese_calendar.is_workday(today)
     except Exception:
-        # fallback: 仅判断周末
-        return datetime.now().weekday() < 5
+        return True  # 已通过 weekday 检查为工作日，库不可用时默认开盘
 
 
 def is_market_hours() -> bool:
@@ -530,8 +536,15 @@ class SimEngine:
         print(f"  明日计划: 卖[{sell_str or '无'}] 买[{buy_str or '无'}]")
 
     def _push_daily_report(self):
-        """推送当日报告（仅交易日15:00后）"""
-        if not is_trading_day() or datetime.now().hour < 15:
+        """推送当日报告（仅交易日 15:00 后）
+
+        硬性守卫: 周六/周日 + 法定节假日 + 调休补班的周六，全部跳过推送。
+        """
+        now = datetime.now()
+        if now.weekday() >= 5:
+            print("  周末跳过推送")
+            return
+        if not is_trading_day() or now.hour < 15:
             print("  非交易时间，跳过推送")
             return
         try:
