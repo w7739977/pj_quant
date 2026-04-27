@@ -10,6 +10,8 @@ A股交易规则:
   - 100股整手
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime
 from portfolio.trade_utils import is_tradeable, calc_shares, estimate_buy_cost, estimate_sell_cost
