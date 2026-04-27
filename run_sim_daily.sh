@@ -12,14 +12,19 @@ echo "=========================================="
 echo "模拟盘启动检查 $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=========================================="
 
-# 判断是否交易日
+# 判断是否 A 股交易日（排除周末 + 法定节假日 + 调休补班的周六）
 IS_TRADING=$(python -c "
 import datetime
-try:
-    import chinese_calendar
-    print('yes' if chinese_calendar.is_workday(datetime.date.today()) else 'no')
-except Exception:
-    print('yes' if datetime.date.today().weekday() < 5 else 'no')
+d = datetime.date.today()
+# 周六/周日一律不开盘（即使是调休补班日，证券交易所也不开）
+if d.weekday() >= 5:
+    print('no')
+else:
+    try:
+        import chinese_calendar
+        print('yes' if chinese_calendar.is_workday(d) else 'no')
+    except Exception:
+        print('yes')
 ")
 
 if [ "$IS_TRADING" != "yes" ]; then

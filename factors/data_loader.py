@@ -26,7 +26,7 @@ def _safe_table_name(code: str) -> str:
 
 def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataFrame:
     """
-    获取小市值股票池（本地 SQLite total_mv 优先，腾讯 API 兜底）
+    获取小市值股票池（汇总表 → 本地SQLite → 腾讯API → AKShare 多级降级）
 
     Parameters
     ----------
@@ -37,6 +37,25 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
     -------
     DataFrame: columns [code, market_cap]
     """
+    # M6: 优先用 latest_market_cap 汇总表（单条 SQL，毫秒级）
+    try:
+        from data.storage import query_market_cap_range, refresh_latest_market_cap
+        results = query_market_cap_range(min_cap, max_cap)
+        if not results:
+            # 表不存在或为空 → 尝试 lazy refresh 一次（首次部署）
+            n = refresh_latest_market_cap()
+            if n > 0:
+                results = query_market_cap_range(min_cap, max_cap)
+                logger.info(f"汇总表 lazy refresh: {n} 只")
+
+        if results:
+            stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
+            logger.info(f"汇总表 mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
+            return stock_df
+    except Exception as e:
+        logger.warning(f"汇总表查询失败: {e}")
+
+    # 优先从本地缓存获取股票列表
     cached = list_cached_stocks()
     if not cached:
         logger.warning("本地无缓存股票，尝试 AKShare")

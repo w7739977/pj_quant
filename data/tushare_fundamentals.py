@@ -266,6 +266,15 @@ def import_to_sqlite(limit=0, only_dates=None):
         print("\n  验证入库结果...")
         _verify_import()
 
+    # ===== M6: 刷新 latest_market_cap 汇总表 =====
+    # 不影响主流程（避免下次 get_small_cap_stocks 跑 4400 次 SQL）
+    try:
+        from data.storage import refresh_latest_market_cap
+        n = refresh_latest_market_cap()
+        print(f"  汇总表 latest_market_cap 已刷新: {n} 只")
+    except Exception as e:
+        print(f"  汇总表刷新失败（不影响主流程）: {e}")
+
     print(f"\n入库完成: {len(updated_stocks)} 只股票已更新, 耗时={elapsed/60:.1f}min")
     return len(updated_stocks)
 

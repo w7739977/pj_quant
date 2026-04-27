@@ -6,6 +6,7 @@ import sqlite3
 import pandas as pd
 import os
 import logging
+from datetime import datetime
 
 from config.settings import DB_PATH
 
@@ -169,6 +170,84 @@ def list_cached_stocks() -> list:
         tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'", conn)
         return [t.replace("stock_", "") for t in tables["name"].tolist()]
     except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+# ============ 市值汇总表（M6 性能优化）============
+
+def _init_market_cap_table(conn: sqlite3.Connection) -> None:
+    """创建 latest_market_cap 汇总表（idempotent）
+
+    单位与 stock_xxx 表 total_mv 一致：万元
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS latest_market_cap (
+            code TEXT PRIMARY KEY,
+            total_mv REAL,
+            updated_at TEXT
+        )
+    """)
+    conn.commit()
+
+
+def refresh_latest_market_cap() -> int:
+    """从所有 stock_xxx 表汇总最新 total_mv，UPSERT 到 latest_market_cap
+
+    每次 tushare_fundamentals 增量后调用一次，避免运行时逐表 SQL。
+    """
+    conn = get_connection()
+    try:
+        _init_market_cap_table(conn)
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+        ).fetchall()]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for table in tables:
+            try:
+                row = conn.execute(
+                    f"SELECT total_mv FROM {table} "
+                    f"WHERE total_mv IS NOT NULL ORDER BY date DESC LIMIT 1"
+                ).fetchone()
+                if row and row[0]:
+                    code = table.replace("stock_", "")
+                    rows.append((code, float(row[0]), now))
+            except Exception:
+                continue
+        if rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO latest_market_cap "
+                "(code, total_mv, updated_at) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def query_market_cap_range(min_cap: float, max_cap: float) -> list:
+    """单条 SQL 范围查询市值（min_cap/max_cap 单位：元）
+
+    Returns
+    -------
+    list of dict: [{code, market_cap}]，market_cap 单位为元，按市值升序
+    返回空列表表示汇总表不存在或为空 → 调用方应 fallback 到腾讯/AKShare
+    """
+    conn = get_connection()
+    try:
+        # 汇总表 total_mv 是万元，min_cap/max_cap 是元 → 比较时换算
+        rows = conn.execute(
+            "SELECT code, total_mv FROM latest_market_cap "
+            "WHERE total_mv * 10000 BETWEEN ? AND ? "
+            "ORDER BY total_mv",
+            (min_cap, max_cap),
+        ).fetchall()
+        return [{"code": code, "market_cap": mv * 1e4} for code, mv in rows]
+    except sqlite3.OperationalError:
+        # 汇总表不存在
         return []
     finally:
         conn.close()

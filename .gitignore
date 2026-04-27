@@ -12,6 +12,9 @@ data/quant.db
 ml/models/*.json
 !ml/models/.gitkeep
 
+# Concurrency lock
+data/*.lock
+
 # Logs
 logs/
 
