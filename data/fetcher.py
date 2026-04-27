@@ -463,11 +463,17 @@ def _fetch_capital_flow_tushare(symbols: list, trade_date: str = None) -> dict:
             if cal is not None and not cal.empty:
                 trade_date = cal.iloc[0].get("pretrade_date")
             if not trade_date:
-                # 回退：直接用前一个工作日
+                # 回退：直接用前一个工作日（感知中国法定节假日）
                 from datetime import timedelta
-                d = datetime.now() - timedelta(days=1)
-                while d.weekday() >= 5:
-                    d -= timedelta(days=1)
+                d = datetime.now().date() - timedelta(days=1)
+                try:
+                    import chinese_calendar
+                    while not chinese_calendar.is_workday(d) or d.weekday() >= 5:
+                        d -= timedelta(days=1)
+                except Exception:
+                    # chinese_calendar 不可用降级到周末判断
+                    while d.weekday() >= 5:
+                        d -= timedelta(days=1)
                 trade_date = d.strftime("%Y%m%d")
 
         df = pro.moneyflow(trade_date=trade_date)

@@ -19,115 +19,10 @@ from config.settings import (
 )
 
 
-def humanize_reason(reason: str, name: str = "") -> str:
-    """将技术指标 reason 翻译成通俗中文"""
-    if not reason:
-        return ""
-
-    # 卖出理由已经是中文
-    if any(kw in reason for kw in ["止损", "止盈", "超时调仓", "调仓换股"]):
-        return reason
-
-    parts = []
-
-    # 排名
-    factor_match = re.search(r"因子#(\d+)", reason)
-    ml_match = re.search(r"ML#(\d+)", reason)
-    both = "★双重确认" in reason
-
-    if factor_match and ml_match:
-        fr, mr = int(factor_match.group(1)), int(ml_match.group(1))
-        if both:
-            parts.append("多因子和ML模型均排名靠前，信号强烈")
-        elif fr <= 20:
-            parts.append(f"多因子排名第{fr}，技术面优势明显")
-        elif mr <= 20:
-            parts.append(f"ML模型预测排名第{mr}，看好后续走势")
-        else:
-            parts.append(f"多因子第{fr}、ML第{mr}")
-
-    # 因子翻译
-    factor_labels = {
-        "mom_20d": True,
-        "pe_ttm": False,
-        "pb": False,
-    }
-    for key, is_pct in factor_labels.items():
-        m = re.search(rf"{key}:([+-]?\d+\.?\d*%?)", reason)
-        if m:
-            val = m.group(1)
-            if key == "pe_ttm":
-                try:
-                    v = float(val)
-                    if v < 0:
-                        parts.append("亏损股")
-                    elif v < 15:
-                        parts.append(f"低估值(PE仅{v:.0f})")
-                    elif v > 50:
-                        parts.append(f"估值偏高(PE={v:.0f})")
-                except ValueError:
-                    pass
-            elif key == "pb":
-                try:
-                    v = float(val)
-                    if v < 1:
-                        parts.append(f"破净(PB={v:.1f})")
-                    elif v < 3:
-                        parts.append(f"估值合理(PB={v:.1f})")
-                except ValueError:
-                    pass
-            elif key == "mom_20d":
-                try:
-                    v = float(val.replace("%", ""))
-                    if v > 15:
-                        parts.append(f"短期强势(20日涨{v:.0f}%)")
-                    elif v > 5:
-                        parts.append(f"温和上涨(20日涨{v:.0f}%)")
-                    elif v < -10:
-                        parts.append(f"短期弱势(20日跌{abs(v):.0f}%)")
-                except ValueError:
-                    pass
-
-    # ML预测
-    pred_match = re.search(r"预测20日收益:([+-]?\d+\.?\d*%?)", reason)
-    if pred_match:
-        try:
-            v = float(pred_match.group(1).replace("%", ""))
-            if v > 3:
-                parts.append(f"模型预测看涨(+{v:.0f}%)")
-            elif v < -3:
-                parts.append(f"模型预测有风险({v:.0f}%)")
-        except ValueError:
-            pass
-
-    # 主力资金流向
-    flow_match = re.search(r"资金:(.+?)(?:\n|$)", reason)
-    if flow_match:
-        flow_str = flow_match.group(1)
-        # 匹配 "主力净流入+5.9亿" 或 "主力净流出7852万"
-        mf_match = re.search(r"主力净(流入|流出)([\d.]+[亿万])", flow_str)
-        if mf_match:
-            direction = mf_match.group(1)
-            mf_amount = mf_match.group(2)
-            if direction == "流入":
-                detail_parts = []
-                elg_m = re.search(r"超大单([+-]?[\d.]+[亿万])", flow_str)
-                lg_m = re.search(r"(?<!超)大单([+-]?[\d.]+[亿万])", flow_str)
-                if elg_m:
-                    detail_parts.append(f"超大单{elg_m.group(1)}")
-                if lg_m:
-                    detail_parts.append(f"大单{lg_m.group(1)}")
-                if detail_parts:
-                    parts.append(f"主力资金净流入{mf_amount}，{', '.join(detail_parts)}，资金积极做多")
-                else:
-                    parts.append(f"主力资金净流入{mf_amount}，资金看好")
-            else:
-                parts.append(f"主力资金净流出{mf_amount}，注意风险")
-
-    if parts:
-        prefix = f"{name}：" if name else ""
-        return f"{prefix}{'，'.join(parts)}"
-    return reason
+def humanize_reason(reason: str, name: str = "", reason_data: dict = None) -> str:
+    """优先用 reason_data dict，无则降级用 reason 字符串正则解析"""
+    from portfolio.reason_text import humanize_reason as _humanize
+    return _humanize(reason_data or {}, name=name, fallback_reason=reason)
 
 # 可交易代码前缀（正则）
 _TRADEABLE_RE = re.compile(r"^(000|001|002|003|300|600|601|603|605)\d{3}$")
@@ -206,7 +101,10 @@ def format_checklist(sell_actions: list, buy_actions: list, summary: dict) -> st
                 f" = {a['amount']:,.0f}元"
             )
             pnl_str = f"{a['pnl']:+,.0f}元 ({a['pnl_pct']:+.1f}%)"
-            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            reason_str = humanize_reason(
+                a.get('reason', ''), a.get('name', ''),
+                reason_data=a.get('reason_data'),
+            )
             lines.append(f"     盈亏: {pnl_str} {reason_str}")
 
     if buy_actions:
@@ -220,7 +118,7 @@ def format_checklist(sell_actions: list, buy_actions: list, summary: dict) -> st
                 f" = {a['amount']:,.0f}元"
             )
             if a.get("reason"):
-                lines.append(f"     {humanize_reason(a['reason'], a.get('name', ''))}")
+                lines.append(f"     {humanize_reason(a['reason'], a.get('name', ''), reason_data=a.get('reason_data'))}")
 
     if not sell_actions and not buy_actions:
         lines.append("")
@@ -247,7 +145,10 @@ def format_push_message(sell_actions: list, buy_actions: list, summary: dict) ->
         lines.append("---")
         for a in sell_actions:
             pnl = f"{a['pnl']:+,.0f}元({a['pnl_pct']:+.1f}%)"
-            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            reason_str = humanize_reason(
+                a.get('reason', ''), a.get('name', ''),
+                reason_data=a.get('reason_data'),
+            )
             lines.append(f"**{a.get('name', '')}**({a['code']}) {a['shares']}股@{a['price']:.2f}")
             lines.append(f"盈亏 {pnl}")
             if reason_str:
@@ -258,7 +159,10 @@ def format_push_message(sell_actions: list, buy_actions: list, summary: dict) ->
         lines.append("**买入**")
         lines.append("---")
         for a in buy_actions:
-            reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
+            reason_str = humanize_reason(
+                a.get('reason', ''), a.get('name', ''),
+                reason_data=a.get('reason_data'),
+            )
             lines.append(
                 f"**{a.get('name', '')}**({a['code']})"
                 f" {a['shares']}股({a['shares']//100}手)"

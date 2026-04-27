@@ -470,13 +470,12 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             reason_parts.append("|".join(key_factors[:3]))
 
         # ML预测收益
+        pred_row = pred[pred["code"] == code] if not pred.empty else pd.DataFrame()
         ml_pred = ml_rank_map.get(code)
-        if ml_pred is not None:
-            pred_row = pred[pred["code"] == code]
-            if not pred_row.empty:
-                pred_ret = pred_row.iloc[0].get("predicted_return", 0)
-                if pred_ret is not None:
-                    reason_parts.append(f"预测20日收益:{pred_ret:+.1%}")
+        if ml_pred is not None and not pred_row.empty:
+            pred_ret = pred_row.iloc[0].get("predicted_return", 0)
+            if pred_ret is not None:
+                reason_parts.append(f"预测20日收益:{pred_ret:+.1%}")
 
         reason = " ".join(reason_parts)
 
@@ -488,6 +487,23 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             "amount": amount,
             "cost": cost,
             "reason": reason,
+            "reason_data": {
+                "factor_rank": factor_rank,
+                "ml_rank": ml_rank,
+                "in_both": bool(row["in_both"]),
+                "key_factors": {
+                    "mom_20d": row.get("mom_20d"),
+                    "pe_ttm": row.get("pe_ttm"),
+                    "pb": row.get("pb"),
+                    "vol_10d": row.get("vol_10d"),
+                    "turnover_rate": row.get("turnover_rate"),
+                },
+                "predicted_return": (
+                    pred_row.iloc[0].get("predicted_return")
+                    if not pred_row.empty else None
+                ),
+                # capital_flow 在 Step 6 之后回填
+            },
             "final_score": round(float(row["final_score"]), 2),
             "dimension_scores": {
                 "技术面": row.get("技术面_score", None),
@@ -499,24 +515,16 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
     # Step 6: 获取买入候选股的主力资金流向（补充展示，不影响选股）
     if picks:
         try:
-            from data.fetcher import fetch_capital_flow_batch, _fmt_flow_amount, _fmt_flow_amount_plain
+            from data.fetcher import fetch_capital_flow_batch
             pick_codes = [p["code"] for p in picks]
             flow_data = fetch_capital_flow_batch(pick_codes)
             for p in picks:
                 flow = flow_data.get(p["code"])
                 if flow:
-                    mf = flow.get("net_mf_amount", 0)
-                    elg = flow.get("elg_net", 0)
-                    lg = flow.get("lg_net", 0)
-                    # 追加资金流向到理由
-                    direction = "净流入" if mf >= 0 else "净流出"
-                    flow_parts = [f"主力{direction}{_fmt_flow_amount_plain(mf)}"]
-                    if abs(elg) >= 1:
-                        flow_parts.append(f"超大单{_fmt_flow_amount(elg)}")
-                    if abs(lg) >= 1:
-                        flow_parts.append(f"大单{_fmt_flow_amount(lg)}")
-                    p["reason"] += f" | 资金:{','.join(flow_parts)}"
-                    p["capital_flow"] = flow
+                    p["capital_flow"] = flow  # 保留兼容
+                    # 同步进 reason_data
+                    if "reason_data" in p and isinstance(p["reason_data"], dict):
+                        p["reason_data"]["capital_flow"] = flow
             if flow_data:
                 print(f"  资金流向: {len(flow_data)}/{len(pick_codes)} 只获取成功")
         except Exception as e:

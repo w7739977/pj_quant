@@ -37,6 +37,7 @@ def _get_decision_note() -> str:
 def _humanize_reason(trade: dict) -> str:
     """
     将技术指标翻译成通俗易懂的理由
+    优先用结构化 reason_data，无则降级用 reason 字符串正则解析
     """
     reason = trade.get("reason", "")
     if not reason:
@@ -44,122 +45,23 @@ def _humanize_reason(trade: dict) -> str:
 
     name = trade.get("name", trade.get("symbol", ""))
 
-    # ---- 卖出理由 ----
-    if "止损" in reason:
-        return reason  # 已经是中文，直接返回
-    if "止盈" in reason:
-        return reason
-    if "超时调仓" in reason:
+    # 卖出理由保持原样
+    if any(kw in reason for kw in ["止损", "止盈", "超时调仓", "调仓换股"]):
         return reason
 
-    # ---- 买入理由 ----
-    # 解析: "因子#1 ML#1583 mom_20d:+20.3%|vol_10d:+2.0%|pe_ttm:11.8 预测20日收益:-2.3%"
-    parts = []
-
-    # 排名信息
-    import re
-    factor_match = re.search(r"因子#(\d+)", reason)
-    ml_match = re.search(r"ML#(\d+)", reason)
-    both = "★双重确认" in reason
-
-    if factor_match and ml_match:
-        fr, mr = int(factor_match.group(1)), int(ml_match.group(1))
-        if both:
-            parts.append(f"多因子和ML模型均排名靠前，信号强烈")
-        elif fr <= 20:
-            parts.append(f"多因子排名第{fr}，技术面优势明显")
-        elif mr <= 20:
-            parts.append(f"ML模型预测排名第{mr}，看好后续走势")
-        else:
-            parts.append(f"多因子第{fr}、ML第{mr}")
-
-    # 关键因子翻译
-    factor_labels = {
-        "mom_20d": ("20日涨幅", True),
-        "mom_5d": ("5日涨幅", True),
-        "vol_10d": ("10日波动", False),
-        "pe_ttm": ("市盈率PE", False),
-        "pb": ("市净率PB", False),
-        "turnover_rate": ("换手率", False),
-    }
-    for key, (label, is_pct) in factor_labels.items():
-        m = re.search(rf"{key}:([+-]?\d+\.?\d*%?)", reason)
-        if m:
-            val = m.group(1)
-            if key == "pe_ttm":
-                try:
-                    v = float(val)
-                    if v < 0:
-                        parts.append("亏损股")
-                    elif v < 15:
-                        parts.append(f"低估值(PE仅{v:.0f})")
-                    elif v > 50:
-                        parts.append(f"估值偏高(PE={v:.0f})")
-                except ValueError:
-                    pass
-            elif key == "pb":
-                try:
-                    v = float(val)
-                    if v < 1:
-                        parts.append(f"破净(PB={v:.1f})")
-                    elif v < 3:
-                        parts.append(f"估值合理(PB={v:.1f})")
-                except ValueError:
-                    pass
-            elif key == "mom_20d":
-                try:
-                    v = float(val.replace("%", ""))
-                    if v > 15:
-                        parts.append(f"短期强势(20日涨{v:.0f}%)")
-                    elif v > 5:
-                        parts.append(f"温和上涨(20日涨{v:.0f}%)")
-                    elif v < -10:
-                        parts.append(f"短期弱势(20日跌{abs(v):.0f}%)")
-                except ValueError:
-                    pass
-
-    # ML预测
-    pred_match = re.search(r"预测20日收益:([+-]?\d+\.?\d*%?)", reason)
-    if pred_match:
+    # 优先用结构化数据
+    reason_data = trade.get("reason_data")
+    if isinstance(reason_data, str):
         try:
-            v = float(pred_match.group(1).replace("%", ""))
-            if v > 3:
-                parts.append(f"模型预测看涨(+{v:.0f}%)")
-            elif v < -3:
-                parts.append(f"模型预测有风险({v:.0f}%)")
-        except ValueError:
-            pass
+            import json
+            reason_data = json.loads(reason_data)
+        except (json.JSONDecodeError, TypeError):
+            reason_data = None
 
-    # 主力资金流向
-    flow_match = re.search(r"资金:(.+?)(?:\n|$)", reason)
-    if flow_match:
-        flow_str = flow_match.group(1)
-        # 匹配 "主力净流入+5.9亿" 或 "主力净流出7852万"
-        mf_match = re.search(r"主力净(流入|流出)([\d.]+[亿万])", flow_str)
-        if mf_match:
-            direction = mf_match.group(1)
-            mf_amount = mf_match.group(2)
-            if direction == "流入":
-                detail_parts = []
-                elg_m = re.search(r"超大单([+-]?[\d.]+[亿万])", flow_str)
-                lg_m = re.search(r"(?<!超)大单([+-]?[\d.]+[亿万])", flow_str)
-                if elg_m:
-                    detail_parts.append(f"超大单{elg_m.group(1)}")
-                if lg_m:
-                    detail_parts.append(f"大单{lg_m.group(1)}")
-                if detail_parts:
-                    parts.append(f"主力资金净流入{mf_amount}，{', '.join(detail_parts)}，资金积极做多")
-                else:
-                    parts.append(f"主力资金净流入{mf_amount}，资金看好")
-            else:
-                parts.append(f"主力资金净流出{mf_amount}，注意风险")
+    from portfolio.reason_text import humanize_reason as _humanize
+    result = _humanize(reason_data or {}, name=name, fallback_reason=reason)
 
-    if parts:
-        result = f"{name}：{'，'.join(parts)}"
-    else:
-        result = reason
-
-    # 维度得分（如果 trade 中有）
+    # 维度得分（如有）
     dim_scores = trade.get("dimension_scores")
     if dim_scores:
         dim_str = _format_dimension_scores(dim_scores, compact=True)

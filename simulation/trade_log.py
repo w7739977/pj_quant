@@ -7,6 +7,8 @@ SQLite 独立数据库 sim_trading.db:
   - sim_snapshots: 每日收盘快照
 """
 
+from __future__ import annotations
+
 import sqlite3
 import json
 import os
@@ -19,12 +21,26 @@ SIM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                            "data", "sim_trading.db")
 
 
+_db_initialized = False
+
+
 def _get_conn() -> sqlite3.Connection:
+    global _db_initialized
     os.makedirs(os.path.dirname(SIM_DB_PATH), exist_ok=True)
     conn = sqlite3.connect(SIM_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    if _db_initialized:
+        _ensure_reason_data_column(conn)
     return conn
+
+
+def _ensure_reason_data_column(conn):
+    """幂等迁移：为老库添加 reason_data 列"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sim_trades)").fetchall()}
+    if "reason_data" not in cols:
+        conn.execute("ALTER TABLE sim_trades ADD COLUMN reason_data TEXT DEFAULT '{}'")
+        conn.commit()
 
 
 def init_db():
@@ -72,6 +88,10 @@ def init_db():
             trades_json     TEXT DEFAULT '[]'
         );
     """)
+    # 幂等迁移: 确保老库有 reason_data 列
+    _ensure_reason_data_column(conn)
+    global _db_initialized
+    _db_initialized = True
     conn.close()
 
 
@@ -122,17 +142,22 @@ def update_order_status(order):
 def save_trade(symbol: str, name: str, side: str, shares: int,
                price: float, amount: float, fee: float,
                profit: float = 0.0, reason: str = "",
-               order_id: int = 0) -> int:
+               order_id: int = 0, reason_data=None) -> int:
     """保存成交记录"""
+    # reason_data: 接受 dict 或 str，统一序列化为 JSON 字符串
+    if isinstance(reason_data, dict):
+        reason_data = json.dumps(reason_data, ensure_ascii=False)
+    elif not reason_data:
+        reason_data = "{}"
     conn = _get_conn()
     cur = conn.execute("""
         INSERT INTO sim_trades
-        (date, symbol, name, side, shares, price, amount, fee, profit, reason, order_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (date, symbol, name, side, shares, price, amount, fee, profit, reason, order_id, reason_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.now().strftime("%Y-%m-%d"),
         symbol, name, side, shares, price, amount, fee,
-        profit, reason, order_id,
+        profit, reason, order_id, reason_data,
     ))
     conn.commit()
     trade_id = cur.lastrowid
