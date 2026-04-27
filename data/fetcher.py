@@ -392,6 +392,167 @@ def fetch_realtime(symbol: str) -> dict:
     return {}
 
 
+# ============ 资金流向 ============
+
+def _fmt_flow_amount(wan_yuan: float) -> str:
+    """万元 → 可读金额字符串（含正负号）: +1.2亿 / -8000万 / +500万"""
+    sign = "+" if wan_yuan >= 0 else "-"
+    abs_val = abs(wan_yuan)
+    if abs_val >= 10000:
+        return f"{sign}{abs_val / 10000:.1f}亿"
+    elif abs_val >= 100:
+        return f"{sign}{abs_val:.0f}万"
+    else:
+        return f"{sign}{abs_val:.1f}万"
+
+
+def _fmt_flow_amount_plain(wan_yuan: float) -> str:
+    """万元 → 可读金额字符串（无符号）: 1.2亿 / 8000万 / 500万"""
+    abs_val = abs(wan_yuan)
+    if abs_val >= 10000:
+        return f"{abs_val / 10000:.1f}亿"
+    elif abs_val >= 100:
+        return f"{abs_val:.0f}万"
+    else:
+        return f"{abs_val:.1f}万"
+
+
+def fetch_capital_flow_batch(symbols: list, trade_date: str = None) -> dict:
+    """
+    批量获取个股资金流向（Tushare 优先，东方财富兜底）
+
+    Parameters
+    ----------
+    symbols : list of str   股票代码 ['000001', '600519']
+    trade_date : str        交易日期 YYYYMMDD，默认最近交易日
+
+    Returns
+    -------
+    dict: {code: {
+        net_mf_amount: float,  # 主力净流入(万元)
+        elg_net: float,        # 超大单净流入(万元)
+        lg_net: float,         # 大单净流入(万元)
+        md_net: float,         # 中单净流入(万元)
+        sm_net: float,         # 小单净流入(万元)
+    }}
+    """
+    if not symbols:
+        return {}
+
+    # 优先 Tushare
+    result = _fetch_capital_flow_tushare(symbols, trade_date)
+    if result:
+        return result
+
+    # 兜底: 东方财富
+    logger.warning("Tushare 资金流向失败，尝试东方财富")
+    return _fetch_capital_flow_eastmoney(symbols)
+
+
+def _fetch_capital_flow_tushare(symbols: list, trade_date: str = None) -> dict:
+    """Tushare moneyflow 接口 — 按交易日获取全市场，过滤目标股"""
+    try:
+        from data.tushare_fundamentals import _init_tushare
+        pro = _init_tushare()
+
+        if trade_date is None:
+            # 取最近交易日：用 pretrade_date 确保是实际有数据的交易日
+            today = datetime.now().strftime("%Y%m%d")
+            cal = pro.trade_cal(exchange="SSE", is_open="1",
+                                start_date=today, end_date=today)
+            if cal is not None and not cal.empty:
+                trade_date = cal.iloc[0].get("pretrade_date")
+            if not trade_date:
+                # 回退：直接用前一个工作日
+                from datetime import timedelta
+                d = datetime.now() - timedelta(days=1)
+                while d.weekday() >= 5:
+                    d -= timedelta(days=1)
+                trade_date = d.strftime("%Y%m%d")
+
+        df = pro.moneyflow(trade_date=trade_date)
+        if df is None or df.empty:
+            return {}
+
+        # 构建本地代码 → ts_code 映射
+        symbol_set = set(symbols)
+
+        result = {}
+        for _, row in df.iterrows():
+            code = row["ts_code"].split(".")[0]
+            if code not in symbol_set:
+                continue
+
+            elg_net = (row.get("buy_elg_amount", 0) or 0) - (row.get("sell_elg_amount", 0) or 0)
+            lg_net = (row.get("buy_lg_amount", 0) or 0) - (row.get("sell_lg_amount", 0) or 0)
+            md_net = (row.get("buy_md_amount", 0) or 0) - (row.get("sell_md_amount", 0) or 0)
+            sm_net = (row.get("buy_sm_amount", 0) or 0) - (row.get("sell_sm_amount", 0) or 0)
+
+            result[code] = {
+                "net_mf_amount": float(row.get("net_mf_amount", 0) or 0),
+                "elg_net": float(elg_net),
+                "lg_net": float(lg_net),
+                "md_net": float(md_net),
+                "sm_net": float(sm_net),
+            }
+
+        logger.info(f"资金流向(Tushare): {len(result)}/{len(symbols)} 只获取成功 ({trade_date})")
+        return result
+
+    except Exception as e:
+        logger.warning(f"Tushare 资金流向失败: {e}")
+        return {}
+
+
+def _fetch_capital_flow_eastmoney(symbols: list) -> dict:
+    """东方财富直连兜底 — 逐只获取最近1天资金流向"""
+    result = {}
+    for symbol in symbols:
+        try:
+            secid = _code_to_secid(symbol)
+            url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            params = {
+                "secid": secid,
+                "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "klt": 101,
+                "lmt": 1,
+            }
+            resp = requests.get(url, params=params, timeout=5)
+            data = resp.json()
+            klines = data.get("data", {}).get("klines", [])
+            if not klines:
+                continue
+
+            # 解析最后一行: 日期,主力净流入,小单,中单,大单,超大单,...
+            parts = klines[-1].split(",")
+            if len(parts) < 6:
+                continue
+
+            main_net = float(parts[1])   # 主力净流入(元)
+            sm_net = float(parts[2])     # 小单净流入
+            md_net = float(parts[3])     # 中单净流入
+            lg_net = float(parts[4])     # 大单净流入
+            elg_net = float(parts[5])    # 超大单净流入
+
+            result[symbol] = {
+                "net_mf_amount": round(main_net / 10000, 2),  # 元→万元
+                "elg_net": round(elg_net / 10000, 2),
+                "lg_net": round(lg_net / 10000, 2),
+                "md_net": round(md_net / 10000, 2),
+                "sm_net": round(sm_net / 10000, 2),
+            }
+            time.sleep(0.05)  # 避免限流
+        except Exception as e:
+            logger.debug(f"东方财富资金流向 {symbol} 失败: {e}")
+            continue
+
+    if result:
+        logger.info(f"资金流向(东方财富): {len(result)}/{len(symbols)} 只获取成功")
+    return result
+
+
 # ============ 保留兼容旧接口 ============
 
 def fetch_etf_realtime(symbol: str) -> dict:

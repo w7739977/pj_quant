@@ -100,6 +100,30 @@ def humanize_reason(reason: str, name: str = "") -> str:
         except ValueError:
             pass
 
+    # 主力资金流向
+    flow_match = re.search(r"资金:(.+?)(?:\n|$)", reason)
+    if flow_match:
+        flow_str = flow_match.group(1)
+        # 匹配 "主力净流入+5.9亿" 或 "主力净流出7852万"
+        mf_match = re.search(r"主力净(流入|流出)([\d.]+[亿万])", flow_str)
+        if mf_match:
+            direction = mf_match.group(1)
+            mf_amount = mf_match.group(2)
+            if direction == "流入":
+                detail_parts = []
+                elg_m = re.search(r"超大单([+-]?[\d.]+[亿万])", flow_str)
+                lg_m = re.search(r"(?<!超)大单([+-]?[\d.]+[亿万])", flow_str)
+                if elg_m:
+                    detail_parts.append(f"超大单{elg_m.group(1)}")
+                if lg_m:
+                    detail_parts.append(f"大单{lg_m.group(1)}")
+                if detail_parts:
+                    parts.append(f"主力资金净流入{mf_amount}，{', '.join(detail_parts)}，资金积极做多")
+                else:
+                    parts.append(f"主力资金净流入{mf_amount}，资金看好")
+            else:
+                parts.append(f"主力资金净流出{mf_amount}，注意风险")
+
     if parts:
         prefix = f"{name}：" if name else ""
         return f"{prefix}{'，'.join(parts)}"
@@ -215,40 +239,43 @@ def format_checklist(sell_actions: list, buy_actions: list, summary: dict) -> st
 
 
 def format_push_message(sell_actions: list, buy_actions: list, summary: dict) -> str:
-    """生成微信推送格式（Markdown）"""
+    """生成微信推送格式（Markdown），结构清晰便于手机阅读"""
     lines = []
 
     if sell_actions:
-        lines.append("**卖出:**")
+        lines.append("**卖出**")
+        lines.append("---")
         for a in sell_actions:
-            pnl = f"{a['pnl']:+,.0f}({a['pnl_pct']:+.1f}%)"
+            pnl = f"{a['pnl']:+,.0f}元({a['pnl_pct']:+.1f}%)"
             reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
-            lines.append(
-                f"- {a.get('name', '')}({a['code']})"
-                f" {a['shares']}股@{a['price']:.2f}"
-                f" {pnl} {reason_str}"
-            )
+            lines.append(f"**{a.get('name', '')}**({a['code']}) {a['shares']}股@{a['price']:.2f}")
+            lines.append(f"盈亏 {pnl}")
+            if reason_str:
+                lines.append(f"> {reason_str}")
+            lines.append("")
 
     if buy_actions:
-        lines.append("**买入:**")
+        lines.append("**买入**")
+        lines.append("---")
         for a in buy_actions:
             reason_str = humanize_reason(a.get('reason', ''), a.get('name', ''))
-            line = (
-                f"- {a.get('name', '')}({a['code']})"
+            lines.append(
+                f"**{a.get('name', '')}**({a['code']})"
                 f" {a['shares']}股({a['shares']//100}手)"
                 f"@{a['price']:.2f} = {a['amount']:,.0f}元"
             )
             if reason_str:
-                line += f"\n  {reason_str}"
-            lines.append(line)
+                lines.append(f"> {reason_str}")
+            lines.append("")
 
     if not sell_actions and not buy_actions:
-        lines.append("今日无操作")
+        lines.append("**今日无操作，继续持有**")
 
     cash = summary.get("cash", 0)
     total = summary.get("total_value", 0)
     pnl = summary.get("total_pnl", 0)
     pct = summary.get("total_pnl_pct", 0)
-    lines.append(f"\n资金{cash:,.0f} | 资产{total:,.0f} | 盈亏{pnl:+,.0f}({pct:+.1f}%)")
+    lines.append("---")
+    lines.append(f"资金 {cash:,.0f} | 总资产 {total:,.0f} | 盈亏 {pnl:+,.0f}({pct:+.1f}%)")
 
     return "\n".join(lines)

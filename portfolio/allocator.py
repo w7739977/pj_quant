@@ -496,6 +496,32 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             },
         })
 
+    # Step 6: 获取买入候选股的主力资金流向（补充展示，不影响选股）
+    if picks:
+        try:
+            from data.fetcher import fetch_capital_flow_batch, _fmt_flow_amount, _fmt_flow_amount_plain
+            pick_codes = [p["code"] for p in picks]
+            flow_data = fetch_capital_flow_batch(pick_codes)
+            for p in picks:
+                flow = flow_data.get(p["code"])
+                if flow:
+                    mf = flow.get("net_mf_amount", 0)
+                    elg = flow.get("elg_net", 0)
+                    lg = flow.get("lg_net", 0)
+                    # 追加资金流向到理由
+                    direction = "净流入" if mf >= 0 else "净流出"
+                    flow_parts = [f"主力{direction}{_fmt_flow_amount_plain(mf)}"]
+                    if abs(elg) >= 1:
+                        flow_parts.append(f"超大单{_fmt_flow_amount(elg)}")
+                    if abs(lg) >= 1:
+                        flow_parts.append(f"大单{_fmt_flow_amount(lg)}")
+                    p["reason"] += f" | 资金:{','.join(flow_parts)}"
+                    p["capital_flow"] = flow
+            if flow_data:
+                print(f"  资金流向: {len(flow_data)}/{len(pick_codes)} 只获取成功")
+        except Exception as e:
+            logger.warning(f"资金流向获取失败(非关键): {e}")
+
     return picks
 
 

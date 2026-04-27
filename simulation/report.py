@@ -130,6 +130,30 @@ def _humanize_reason(trade: dict) -> str:
         except ValueError:
             pass
 
+    # 主力资金流向
+    flow_match = re.search(r"资金:(.+?)(?:\n|$)", reason)
+    if flow_match:
+        flow_str = flow_match.group(1)
+        # 匹配 "主力净流入+5.9亿" 或 "主力净流出7852万"
+        mf_match = re.search(r"主力净(流入|流出)([\d.]+[亿万])", flow_str)
+        if mf_match:
+            direction = mf_match.group(1)
+            mf_amount = mf_match.group(2)
+            if direction == "流入":
+                detail_parts = []
+                elg_m = re.search(r"超大单([+-]?[\d.]+[亿万])", flow_str)
+                lg_m = re.search(r"(?<!超)大单([+-]?[\d.]+[亿万])", flow_str)
+                if elg_m:
+                    detail_parts.append(f"超大单{elg_m.group(1)}")
+                if lg_m:
+                    detail_parts.append(f"大单{lg_m.group(1)}")
+                if detail_parts:
+                    parts.append(f"主力资金净流入{mf_amount}，{', '.join(detail_parts)}，资金积极做多")
+                else:
+                    parts.append(f"主力资金净流入{mf_amount}，资金看好")
+            else:
+                parts.append(f"主力资金净流出{mf_amount}，注意风险")
+
     if parts:
         result = f"{name}：{'，'.join(parts)}"
     else:
@@ -573,63 +597,69 @@ def _format_terminal_daily(date, sells, buys, cash, total_value,
 
 def _format_push_daily(date, sells, buys, cash, total_value,
                        daily_ret, total_ret, holdings) -> str:
-    """微信推送Markdown格式"""
-    lines = [f"## 模拟盘日报 {date}\n"]
+    """微信推送Markdown格式，结构清晰便于手机阅读"""
+    lines = [f"**模拟盘日报 {date}**"]
 
     if sells:
-        lines.append("**卖出:**")
+        lines.append("\n**卖出**")
+        lines.append("---")
         for t in sells:
-            profit_str = f" 盈亏{t['profit']:+,.0f}" if t.get("profit") else ""
+            profit_str = f"盈亏{t['profit']:+,.0f}元" if t.get("profit") else ""
             human_reason = _humanize_reason(t)
-            reason_str = f" — {human_reason}" if human_reason else ""
-            lines.append(
-                f"- {t.get('name', '')}({t['symbol']})"
-                f" {t['shares']}股@{t['price']:.2f}"
-                f"{profit_str}{reason_str}"
-            )
+            lines.append(f"**{t.get('name', '')}**({t['symbol']}) {t['shares']}股@{t['price']:.2f}")
+            if profit_str:
+                lines.append(profit_str)
+            if human_reason:
+                lines.append(f"> {human_reason}")
+            lines.append("")
 
     if buys:
-        lines.append("**买入:**")
+        lines.append("**买入**")
+        lines.append("---")
         for t in buys:
             human_reason = _humanize_reason(t)
-            reason_str = f" — {human_reason}" if human_reason else ""
-            lines.append(
-                f"- {t.get('name', '')}({t['symbol']})"
-                f" {t['shares']}股@{t['price']:.2f}"
-                f" = {t['amount']:,.0f}元{reason_str}"
-            )
+            lines.append(f"**{t.get('name', '')}**({t['symbol']}) {t['shares']}股@{t['price']:.2f} = {t['amount']:,.0f}元")
+            if human_reason:
+                lines.append(f"> {human_reason}")
+            lines.append("")
 
     if not sells and not buys:
-        lines.append("**今日无交易**")
+        lines.append("")
         note = _get_decision_note()
         if note:
-            lines.append(f"> {note}")
+            lines.append(f"**今日无交易** — {note}")
+        else:
+            lines.append("**今日无交易**")
 
-    lines.append(f"\n现金{cash:,.0f} | 资产{total_value:,.0f}")
-    lines.append(f"今日{daily_ret:+.2%} | 累计{total_ret:+.2%}")
+    lines.append("---")
+    lines.append(f"现金 {cash:,.0f} | 总资产 {total_value:,.0f}")
+    lines.append(f"今日 {daily_ret:+.2%} | 累计 {total_ret:+.2%}")
 
     # AI 整体解读
     ai_summary = _ai_decision_summary(sells, buys, holdings, total_value, daily_ret)
     if ai_summary:
-        lines.append(f"\n> {ai_summary}")
+        lines.append(f"\n> AI解读: {ai_summary}")
 
-    # 持仓因子分析
+    # 持仓分析
     holding_analysis = _get_holding_analysis()
     if holding_analysis:
-        lines.append("\n**持仓分析:**")
+        lines.append("\n**持仓**")
+        lines.append("---")
         for ha in holding_analysis:
-            pnl_str = f"{ha['pnl_pct']:+.1f}%"
+            pnl_str = f"{ha['pnl_pct']:+.1f}%({ha['pnl_amount']:+,.0f}元)"
+            days_str = f"持有{ha.get('days_held', '?')}日"
+            lines.append(
+                f"**{ha['name']}**({ha['code']})"
+                f" {holdings.get(ha['code'], {}).get('shares', '?')}股"
+                f" | {pnl_str} | {days_str}"
+            )
             dim_str = _format_dimension_scores(ha.get("dimension_scores", {}), compact=True)
             sent_str = _format_sentiment(ha.get("sentiment", {}), compact=True)
-            line = f"- {ha['name']}({ha['code']}) {pnl_str}"
-            extras = []
             if dim_str:
-                extras.append(dim_str)
+                lines.append(f"  {dim_str}")
             if sent_str:
-                extras.append(sent_str)
-            if extras:
-                line += "\n  " + " | ".join(extras)
-            lines.append(line)
+                lines.append(f"  {sent_str}")
+            lines.append("")
         ai_hold = _ai_holding_summary(holding_analysis)
         if ai_hold:
             lines.append(f"> {ai_hold}")
