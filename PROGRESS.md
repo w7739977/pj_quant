@@ -1,5 +1,110 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-27 humanize_reason 结构化重构 + Py3.9 兼容
+
+### 背景
+
+上午 e341282 在老 reason 字符串拼接架构上加了主力资金流向展示，本质是"先字符串化再正则反解析"的反模式：
+- `pick["capital_flow"]` 已经是结构化 dict 但下游忽略
+- `trade_utils.humanize_reason` 和 `simulation/report._humanize_reason` 各有一段相同的资金流 regex 解析（重复代码）
+- 流出场景丢了超大单/大单明细
+- 多个 ` | ` 分隔符嵌套 `,`，未来加新字段必撞车
+
+main 分支 4 月初已做过同类重构（`portfolio/reason_text.py` 集中处理结构化 dict + reason_data 数据链贯通），本次合并该思路到 simulated-trading。
+
+### 改动汇总
+
+**1. 新建 `portfolio/reason_text.py`（243 行）**
+
+集中处理结构化 dict 文案生成，所有模块共用：
+- `humanize_reason(reason_data, name, fallback_reason)` 主路径接受 dict
+- `_format_capital_flow(cf)` 流入流出文案对称（流出也展示超大单/大单明细）
+- `_legacy_humanize()` 仅作 fallback，老 reason 字符串调用仍可解析
+
+**2. allocator.py picks 携带 `reason_data`**
+
+`get_stock_picks_live` 在每个 pick 里加 `reason_data` dict（factor_rank/ml_rank/in_both/key_factors/predicted_return），Step 6 把资金流也同步进去：
+
+```python
+"reason_data": {
+    "factor_rank": 3, "ml_rank": 5, "in_both": True,
+    "key_factors": {"mom_20d": 0.20, "pe_ttm": 11.8, "pb": 0.9, ...},
+    "predicted_return": 0.031,
+    "capital_flow": {"net_mf_amount": 5000, "elg_net": 12000, "lg_net": -3000},
+}
+```
+
+不再 `p["reason"] += " | 资金:..."` 字符串拼接。
+
+**3. engine.py 数据链贯通**
+
+- `_generate_next_plan` 拷贝 picks → plan["buys"] 时带 `reason_data`
+- 新增 `_get_order_reason_data(order)` 从 plan 反查
+- `_execute_order` 调 `save_trade(..., reason_data=...)` 入库
+
+**4. trade_log.py schema 增加 reason_data 列 + idempotent ALTER**
+
+```python
+def _ensure_reason_data_column(conn):
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sim_trades)").fetchall()}
+    if "reason_data" not in cols:
+        conn.execute("ALTER TABLE sim_trades ADD COLUMN reason_data TEXT DEFAULT '{}'")
+        conn.commit()
+```
+
+`_get_conn()` 末尾调用，老库自动迁移。`save_trade(reason_data=)` 接受 dict 或 str，自动 JSON 序列化。
+
+**5. trade_utils + report.py 删 regex**
+
+`humanize_reason(reason, name, reason_data=None)` 改 3 参数，4 处调用补 `reason_data` 参数；删除两段重复的资金流 regex 解析代码。`report._humanize_reason(trade)` 优先读 `trade["reason_data"]`。
+
+**6. M2 顺手修复 — `data/fetcher.py` 节假日感知**
+
+`_fetch_capital_flow_tushare` fallback 路径用 `chinese_calendar.is_workday` 倒推上一个真实交易日，不再仅判断周末。
+
+**7. 兼容性修复**
+
+- `simulation/matcher.py` 加 `from __future__ import annotations`，修复 `Order | None` 在 Py3.9 报 TypeError 的问题
+- `.gitignore` 加 `data/sim_trading.db*`，避免运行模拟盘时三个 .db 文件污染 git status
+
+### 修改文件汇总
+
+| 文件 | 变更 | 行数 |
+|------|------|------|
+| `portfolio/reason_text.py` | 新建 | +243 |
+| `portfolio/allocator.py` | picks 加 reason_data，Step 6 同步 capital_flow | +46/-6 |
+| `simulation/engine.py` | _get_order_reason_data + plan 携带 reason_data | +11 |
+| `simulation/trade_log.py` | reason_data 列 + idempotent ALTER + JSON 序列化 | +33/-5 |
+| `portfolio/trade_utils.py` | humanize_reason 改 3 参数，删 regex | -130 |
+| `simulation/report.py` | _humanize_reason 改用结构化，删 regex | -124 |
+| `data/fetcher.py` | moneyflow trade_date 节假日感知 | +14 |
+| `simulation/matcher.py` | from __future__ import annotations | +1 |
+| `.gitignore` | data/sim_trading.db* | +1 |
+
+### 验收
+
+- pytest 连续 2 次 57 项全过
+- `grep "re\.search.*因子#\|re\.search.*资金:" portfolio/trade_utils.py simulation/report.py` 无残留
+- 结构化路径文案测试: 流入流出对称展示明细，文案自然
+- legacy fallback 测试: 老 reason 字符串调用仍能解析
+- 本机 Py3.9 `SimEngine()` 烟囱测试通过
+
+### 部署影响
+
+**云主机定时任务无需重新执行/重启**：
+- crontab 配置不变
+- 代码改动 backward-compatible，trade_log schema 变更通过幂等 ALTER 自动迁移
+- 模拟盘是每日 cron 触发，不是常驻进程；下个交易日 (4-28) 09:05 自动用新代码
+
+云主机操作步骤：
+```bash
+cd /home/ubuntu/pj_quant
+git pull origin feature/simulated-trading
+# 下个交易日 cron 自动触发，无需手动操作
+```
+
+---
+
 ## 2026-04-27 主力资金流向 + 推送格式优化
 
 ### 背景
