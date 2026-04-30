@@ -1,255 +1,281 @@
 """
-模拟盘交易日志 — SQLite 持久化
+模拟交易记录 + 每日快照
 
-三张表:
-  - sim_orders: 订单记录
-  - sim_trades: 成交记录
-  - sim_snapshots: 每日快照
+SQLite 独立数据库 sim_trading.db:
+  - sim_orders:    订单记录
+  - sim_trades:    成交记录
+  - sim_snapshots: 每日收盘快照
 """
 
-import json
+from __future__ import annotations
+
 import sqlite3
+import json
 import os
 import logging
 from datetime import datetime
-from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "sim_trading.db",
-)
-_PORTFOLIO_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "sim_portfolio.json",
-)
+SIM_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                           "data", "sim_trading.db")
+
+
+_db_initialized = False
 
 
 def _get_conn() -> sqlite3.Connection:
-    """获取 SQLite 连接（自动建表）"""
-    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH)
+    global _db_initialized
+    os.makedirs(os.path.dirname(SIM_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(SIM_DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS sim_orders (
-            order_id INTEGER PRIMARY KEY,
-            symbol TEXT,
-            side TEXT,
-            order_type TEXT,
-            shares INTEGER,
-            price REAL,
-            reason TEXT,
-            status TEXT,
-            filled_price REAL,
-            filled_shares INTEGER,
-            fee REAL,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS sim_trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            symbol TEXT,
-            name TEXT,
-            side TEXT,
-            shares INTEGER,
-            price REAL,
-            amount REAL,
-            fee REAL,
-            profit REAL DEFAULT 0,
-            reason TEXT DEFAULT '',
-            order_id INTEGER DEFAULT 0,
-            reason_data TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS sim_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            cash REAL,
-            market_value REAL,
-            total_value REAL,
-            daily_return REAL,
-            total_return REAL,
-            positions TEXT DEFAULT '{}',
-            trades TEXT DEFAULT '[]'
-        );
-    """)
+    conn.execute("PRAGMA journal_mode=WAL")
+    if _db_initialized:
+        _ensure_reason_data_column(conn)
     return conn
 
 
-def load_sim_portfolio() -> dict:
-    """加载模拟持仓"""
-    from config.settings import INITIAL_CAPITAL
-    default = {"cash": float(INITIAL_CAPITAL), "holdings": {}}
-    if not os.path.exists(_PORTFOLIO_PATH):
-        return default
-    try:
-        with open(_PORTFOLIO_PATH, "r") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def save_sim_portfolio(portfolio: dict) -> None:
-    """保存模拟持仓"""
-    os.makedirs(os.path.dirname(_PORTFOLIO_PATH), exist_ok=True)
-    with open(_PORTFOLIO_PATH, "w") as f:
-        json.dump(portfolio, f, ensure_ascii=False, indent=2)
-
-
-def save_order(order) -> None:
-    """写入订单"""
-    conn = _get_conn()
-    try:
-        conn.execute(
-            """INSERT OR REPLACE INTO sim_orders
-               (order_id, symbol, side, order_type, shares, price,
-                reason, status, filled_price, filled_shares, fee, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (order.order_id, order.symbol, order.side, order.order_type,
-             order.shares, order.price, order.reason, order.status,
-             order.filled_price, order.filled_shares, order.fee,
-             order.created_at),
-        )
+def _ensure_reason_data_column(conn):
+    """幂等迁移：为老库添加 reason_data 列"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sim_trades)").fetchall()}
+    if "reason_data" not in cols:
+        conn.execute("ALTER TABLE sim_trades ADD COLUMN reason_data TEXT DEFAULT '{}'")
         conn.commit()
-    finally:
-        conn.close()
 
 
-def update_order_status(order) -> None:
+def init_db():
+    """初始化表结构"""
+    conn = _get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS sim_orders (
+            order_id    INTEGER PRIMARY KEY,
+            date        TEXT NOT NULL,
+            symbol      TEXT NOT NULL,
+            side        TEXT NOT NULL,
+            shares      INTEGER NOT NULL,
+            price       REAL DEFAULT 0,
+            reason      TEXT DEFAULT '',
+            status      TEXT DEFAULT 'pending',
+            filled_price REAL DEFAULT 0,
+            filled_shares INTEGER DEFAULT 0,
+            fee         REAL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sim_trades (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            date        TEXT NOT NULL,
+            symbol      TEXT NOT NULL,
+            name        TEXT DEFAULT '',
+            side        TEXT NOT NULL,
+            shares      INTEGER NOT NULL,
+            price       REAL NOT NULL,
+            amount      REAL NOT NULL,
+            fee         REAL DEFAULT 0,
+            profit      REAL DEFAULT 0,
+            reason      TEXT DEFAULT '',
+            order_id    INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS sim_snapshots (
+            date            TEXT PRIMARY KEY,
+            cash            REAL NOT NULL,
+            market_value    REAL NOT NULL,
+            total_value     REAL NOT NULL,
+            daily_return    REAL DEFAULT 0,
+            total_return    REAL DEFAULT 0,
+            positions_json  TEXT DEFAULT '{}',
+            trades_json     TEXT DEFAULT '[]'
+        );
+    """)
+    # 幂等迁移: 确保老库有 reason_data 列
+    _ensure_reason_data_column(conn)
+    global _db_initialized
+    _db_initialized = True
+    conn.close()
+
+
+# ============ 订单记录 ============
+
+def save_order(order) -> int:
+    """保存订单"""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO sim_orders
+        (order_id, date, symbol, side, shares, price, reason,
+         status, filled_price, filled_shares, fee, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        order.order_id,
+        datetime.now().strftime("%Y-%m-%d"),
+        order.symbol,
+        order.side,
+        order.shares,
+        order.price,
+        order.reason,
+        order.status,
+        order.filled_price,
+        order.filled_shares,
+        order.fee,
+        order.created_at,
+    ))
+    conn.commit()
+    conn.close()
+    return order.order_id
+
+
+def update_order_status(order):
     """更新订单状态"""
     conn = _get_conn()
-    try:
-        conn.execute(
-            """UPDATE sim_orders
-               SET status=?, filled_price=?, filled_shares=?, fee=?, reason=?
-               WHERE order_id=?""",
-            (order.status, order.filled_price, order.filled_shares,
-             order.fee, order.reason, order.order_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute("""
+        UPDATE sim_orders
+        SET status=?, filled_price=?, filled_shares=?, fee=?
+        WHERE order_id=?
+    """, (order.status, order.filled_price, order.filled_shares,
+          order.fee, order.order_id))
+    conn.commit()
+    conn.close()
 
+
+# ============ 成交记录 ============
 
 def save_trade(symbol: str, name: str, side: str, shares: int,
-               price: float, amount: float, fee: float, *,
+               price: float, amount: float, fee: float,
                profit: float = 0.0, reason: str = "",
-               order_id: int = 0, reason_data=None) -> None:
-    """写入成交记录"""
-    # reason_data: 统一序列化为 JSON 字符串
+               order_id: int = 0, reason_data=None) -> int:
+    """保存成交记录"""
+    # reason_data: 接受 dict 或 str，统一序列化为 JSON 字符串
     if isinstance(reason_data, dict):
         reason_data = json.dumps(reason_data, ensure_ascii=False)
     elif not reason_data:
         reason_data = "{}"
     conn = _get_conn()
-    try:
-        conn.execute(
-            """INSERT INTO sim_trades
-               (date, symbol, name, side, shares, price, amount, fee,
-                profit, reason, order_id, reason_data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             symbol, name, side, shares, price, amount, fee,
-             profit, reason, order_id, reason_data),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    cur = conn.execute("""
+        INSERT INTO sim_trades
+        (date, symbol, name, side, shares, price, amount, fee, profit, reason, order_id, reason_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now().strftime("%Y-%m-%d"),
+        symbol, name, side, shares, price, amount, fee,
+        profit, reason, order_id, reason_data,
+    ))
+    conn.commit()
+    trade_id = cur.lastrowid
+    conn.close()
+    return trade_id
 
 
-def save_snapshot(*, cash, market_value, total_value,
-                  daily_return, total_return, positions, trades) -> None:
-    """保存每日快照"""
+def get_today_trades() -> list[dict]:
+    """获取今日成交"""
     conn = _get_conn()
-    try:
-        conn.execute(
-            """INSERT INTO sim_snapshots
-               (date, cash, market_value, total_value, daily_return,
-                total_return, positions, trades)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (datetime.now().strftime("%Y-%m-%d"),
-             cash, market_value, total_value, daily_return, total_return,
-             json.dumps(positions, ensure_ascii=False),
-             json.dumps(trades, ensure_ascii=False)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = conn.execute(
+        "SELECT * FROM sim_trades WHERE date=? ORDER BY id", (today,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def get_latest_snapshot() -> Optional[dict]:
+def get_trades(start_date: str = None, end_date: str = None,
+               symbol: str = None) -> list[dict]:
+    """查询成交记录"""
+    conn = _get_conn()
+    sql = "SELECT * FROM sim_trades WHERE 1=1"
+    params = []
+    if start_date:
+        sql += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        sql += " AND date <= ?"
+        params.append(end_date)
+    if symbol:
+        sql += " AND symbol = ?"
+        params.append(symbol)
+    sql += " ORDER BY date, id"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ============ 每日快照 ============
+
+def save_snapshot(cash: float, market_value: float, total_value: float,
+                  daily_return: float, total_return: float,
+                  positions: dict, trades: list):
+    """保存每日收盘快照"""
+    conn = _get_conn()
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn.execute("""
+        INSERT OR REPLACE INTO sim_snapshots
+        (date, cash, market_value, total_value, daily_return, total_return,
+         positions_json, trades_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        today, cash, market_value, total_value,
+        daily_return, total_return,
+        json.dumps(positions, ensure_ascii=False),
+        json.dumps(trades, ensure_ascii=False),
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_latest_snapshot() -> dict | None:
     """获取最近一次快照"""
     conn = _get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM sim_snapshots ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return None
-        d = dict(row)
-        # 解析 JSON 字段
-        for key in ("positions", "trades"):
-            if isinstance(d.get(key), str):
-                try:
-                    d[key] = json.loads(d[key])
-                except (json.JSONDecodeError, TypeError):
-                    d[key] = {} if key == "positions" else []
-        return d
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT * FROM sim_snapshots ORDER BY date DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    result = dict(row)
+    result["positions"] = json.loads(result.get("positions_json", "{}"))
+    result["trades"] = json.loads(result.get("trades_json", "[]"))
+    return result
 
 
-def get_today_trades() -> List[dict]:
-    """获取今日成交"""
-    today = datetime.now().strftime("%Y-%m-%d")
+def get_snapshots(limit: int = 30) -> list[dict]:
+    """获取最近N天的快照"""
     conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM sim_snapshots ORDER BY date DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    results = []
+    for row in rows:
+        r = dict(row)
+        r["positions"] = json.loads(r.get("positions_json", "{}"))
+        r["trades"] = json.loads(r.get("trades_json", "[]"))
+        results.append(r)
+    return results
+
+
+# ============ 模拟盘持仓状态 ============
+
+SIM_PORTFOLIO_PATH = os.path.join(os.path.dirname(SIM_DB_PATH),
+                                  "sim_portfolio.json")
+
+
+def save_sim_portfolio(state: dict):
+    """保存模拟盘持仓"""
+    with open(SIM_PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def load_sim_portfolio() -> dict:
+    """加载模拟盘持仓"""
+    from config.settings import SIM_INITIAL_CAPITAL
+    if not os.path.exists(SIM_PORTFOLIO_PATH):
+        return {"cash": SIM_INITIAL_CAPITAL, "holdings": {}}
     try:
-        rows = conn.execute(
-            "SELECT * FROM sim_trades WHERE date LIKE ? ORDER BY id",
-            (f"{today}%",),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+        with open(SIM_PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"cash": SIM_INITIAL_CAPITAL, "holdings": {}}
 
 
-def get_trades(start_date: str = None, end_date: str = None) -> List[dict]:
-    """获取成交记录（按日期范围）"""
-    conn = _get_conn()
-    try:
-        sql = "SELECT * FROM sim_trades WHERE 1=1"
-        params = []
-        if start_date:
-            sql += " AND date >= ?"
-            params.append(start_date)
-        if end_date:
-            sql += " AND date <= ?"
-            params.append(f"{end_date} 23:59:59")
-        sql += " ORDER BY id"
-        rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+# ============ 初始化 ============
 
-
-def get_snapshots(limit: int = 30) -> List[dict]:
-    """获取快照（按日期降序）"""
-    conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM sim_snapshots ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        results = []
-        for r in rows:
-            d = dict(r)
-            for key in ("positions", "trades"):
-                if isinstance(d.get(key), str):
-                    try:
-                        d[key] = json.loads(d[key])
-                    except (json.JSONDecodeError, TypeError):
-                        d[key] = {} if key == "positions" else []
-            results.append(d)
-        return results
-    finally:
-        conn.close()
+init_db()

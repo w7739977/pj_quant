@@ -63,7 +63,7 @@ BRAVE_API_KEY = "BSA_6qnODLG_U_CLx6z4rlfy9YF-TQh"
 BRAVE_BASE_URL = "https://api.search.brave.com/res/v1/web/search"
 
 # ============ 模拟盘参数 ============
-SIM_INITIAL_CAPITAL = 20000.0
+SIM_INITIAL_CAPITAL = 500000.0
 SIM_DB_PATH = "data/sim_trading.db"
 SIM_BAR_INTERVAL = 180     # 盘中轮询间隔(秒)
 

@@ -1,6 +1,63 @@
 # A股量化系统 - 开发进度
 
+## 2026-04-30 模拟盘50万仓位 + 加权分配 + 推荐理由维度拆解
+
+### 背景
+
+模拟盘初始资金从2万调整为50万，同步优化选股分配策略和推荐理由展示。
+
+### 改动汇总
+
+**1. 仓位调整（2万→50万）**
+
+- `config/settings.py` — `SIM_INITIAL_CAPITAL` 20000→500000
+- `simulation/engine.py` — 引擎初始化改用 `SIM_INITIAL_CAPITAL`（之前误用了回测的 `INITIAL_CAPITAL`）
+- `simulation/trade_log.py` — 默认仓位同步改用 `SIM_INITIAL_CAPITAL`
+- `sim_portfolio.json` / `sim_trading.db` — 重置为50万空仓，清空历史数据
+
+**2. 等权分配→按 final_score 加权分配（收益最大化）**
+
+`portfolio/allocator.py` `get_stock_picks_live` 资金分配逻辑重构：
+- 旧：`per_stock = stock_capital / top_n`（等权）
+- 新：按 `final_score`（=1/因子排名×100 + 1/ML排名×50 + 交集加分×20）归一化为权重，得分越高分配越多
+- reason 中新增 `仓位XX%` 标注每只个股的资金占比
+
+**3. 推荐理由维度拆解（分行展示）**
+
+`portfolio/reason_text.py` `humanize_reason` 重构为分层格式：
+
+```
+锦泓集团：因子#1、ML#872、得分142.8
+  技术面75分(优)｜20日涨+17.2%(强势)，RSI=65，波动4.4%，MA5偏离-3.3%
+  基本面85分(优)｜PE=11(低估值)，PB=0.8(破净)，换手率7.5%(活跃)
+  资金面65分(良)｜量比2.2(放量)，5日均换手6.8%，换手加速+15%
+  ML预测｜偏多，预测20日+0.2%
+  资金面｜主力净流入2846万，资金积极做多
+```
+
+- `portfolio/allocator.py` — reason_data 新增 `final_score`、`dimension_scores`、`dimension_details`（每个维度的具体因子值）
+- `portfolio/reason_text.py` — `_format_dim_detail` 按维度翻译指标值+定性标签
+- `simulation/report.py` — 维度得分展示兼容新数据结构
+
+**4. Bug 修复**
+
+- `simulation/engine.py` — numpy float32 JSON 序列化崩溃（新增 `_json_default` 处理器）
+- allocator picks 中 numpy 类型统一 `_native()` 转换为 Python 原生类型
+
+### 涉及文件
+
+| 文件 | 改动 |
+|------|------|
+| `config/settings.py` | SIM_INITIAL_CAPITAL 50万 |
+| `portfolio/allocator.py` | 加权分配 + dimension_details + numpy 类型安全 |
+| `portfolio/reason_text.py` | 分行格式 + 维度指标拆解 + ML 预测分级 |
+| `simulation/engine.py` | 用 SIM_INITIAL_CAPITAL + _json_default |
+| `simulation/trade_log.py` | 默认仓位用 SIM_INITIAL_CAPITAL |
+| `simulation/report.py` | dimension_scores 兼容 |
+
 ## 2026-04-25 代码 review 闭环修复（5 轮）
+
+## 2026-04-27 humanize_reason 结构化重构 + Py3.9 兼容
 
 ### 背景
 

@@ -13,13 +13,12 @@ from simulation.trade_log import (
     get_today_trades, get_trades, get_snapshots,
     get_latest_snapshot, load_sim_portfolio,
 )
-from portfolio.reason_text import humanize_reason as _humanize_reason_from_dict
 
 logger = logging.getLogger(__name__)
 
 
-def _load_daily_plan() -> dict:
-    """读取今日计划文件（一次 IO）"""
+def _get_decision_note() -> str:
+    """读取今日计划中的决策摘要"""
     try:
         import json, os
         plan_file = os.path.join(
@@ -28,21 +27,17 @@ def _load_daily_plan() -> dict:
         )
         if os.path.exists(plan_file):
             with open(plan_file, "r") as f:
-                return json.load(f)
+                plan = json.load(f)
+            return plan.get("decision_note", "")
     except Exception:
         pass
-    return {}
-
-
-def _get_decision_note() -> str:
-    """读取今日计划中的决策摘要"""
-    return _load_daily_plan().get("decision_note", "")
+    return ""
 
 
 def _humanize_reason(trade: dict) -> str:
     """
     将技术指标翻译成通俗易懂的理由
-    优先使用结构化 reason_data，降级用正则解析 reason 字符串
+    优先用结构化 reason_data，无则降级用 reason 字符串正则解析
     """
     reason = trade.get("reason", "")
     if not reason:
@@ -50,36 +45,31 @@ def _humanize_reason(trade: dict) -> str:
 
     name = trade.get("name", trade.get("symbol", ""))
 
-    # ---- 卖出理由 ----
-    if "止损" in reason:
-        return reason
-    if "止盈" in reason:
-        return reason
-    if "超时调仓" in reason:
+    # 卖出理由保持原样
+    if any(kw in reason for kw in ["止损", "止盈", "超时调仓", "调仓换股"]):
         return reason
 
     # 优先用结构化数据
     reason_data = trade.get("reason_data")
-    if reason_data:
+    if isinstance(reason_data, str):
         try:
-            if isinstance(reason_data, str):
-                import json
-                reason_data = json.loads(reason_data)
+            import json
+            reason_data = json.loads(reason_data)
         except (json.JSONDecodeError, TypeError):
             reason_data = None
 
-    result = _humanize_reason_from_dict(
-        reason_data or {},
-        name=name,
-        fallback_reason=reason,
-    )
+    from portfolio.reason_text import humanize_reason as _humanize
+    result = _humanize(reason_data or {}, name=name, fallback_reason=reason)
 
-    # 维度得分（如果 trade 中有）
-    dim_scores = trade.get("dimension_scores")
-    if dim_scores:
-        dim_str = _format_dimension_scores(dim_scores, compact=True)
-        if dim_str:
-            result += f"\n    得分: {dim_str}"
+    # 维度得分详细明细（如有）
+    dim_scores = trade.get("dimension_scores") or (reason_data or {}).get("dimension_scores")
+    if dim_scores and isinstance(dim_scores, dict) and any(v is not None for v in dim_scores.values()):
+        # 只有包含完整 items 的 dimension_scores 才展示明细
+        first_val = next(iter(dim_scores.values()), None)
+        if isinstance(first_val, dict) and "items" in first_val:
+            dim_str = _format_dimension_scores(dim_scores, compact=True)
+            if dim_str:
+                result += f"\n    得分明细: {dim_str}"
 
     return result
 
@@ -163,7 +153,19 @@ def _ai_decision_summary(sells: list, buys: list, holdings: dict,
 
 def _get_holding_analysis() -> list:
     """从计划文件中读取持仓因子分析"""
-    return _load_daily_plan().get("holding_analysis", [])
+    try:
+        import json, os
+        plan_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "sim_daily_plan.json"
+        )
+        if os.path.exists(plan_file):
+            with open(plan_file, "r") as f:
+                plan = json.load(f)
+            return plan.get("holding_analysis", [])
+    except Exception:
+        pass
+    return []
 
 
 def _describe_holding_factors(factors: dict) -> str:
@@ -411,7 +413,7 @@ def _format_terminal_daily(date, sells, buys, cash, total_value,
         lines.append("")
         lines.append("--- 卖出 ---")
         for t in sells:
-            profit_str = f"{t['profit']:+,.0f}元" if t.get("profit") is not None else ""
+            profit_str = f"{t['profit']:+,.0f}元" if t.get("profit") else ""
             human_reason = _humanize_reason(t)
             lines.append(
                 f"  {t.get('name', '')}({t['symbol']})"
@@ -500,63 +502,69 @@ def _format_terminal_daily(date, sells, buys, cash, total_value,
 
 def _format_push_daily(date, sells, buys, cash, total_value,
                        daily_ret, total_ret, holdings) -> str:
-    """微信推送Markdown格式"""
-    lines = [f"## 模拟盘日报 {date}\n"]
+    """微信推送Markdown格式，结构清晰便于手机阅读"""
+    lines = [f"**模拟盘日报 {date}**"]
 
     if sells:
-        lines.append("**卖出:**")
+        lines.append("\n**卖出**")
+        lines.append("---")
         for t in sells:
-            profit_str = f" 盈亏{t['profit']:+,.0f}" if t.get("profit") is not None else ""
+            profit_str = f"盈亏{t['profit']:+,.0f}元" if t.get("profit") else ""
             human_reason = _humanize_reason(t)
-            reason_str = f" — {human_reason}" if human_reason else ""
-            lines.append(
-                f"- {t.get('name', '')}({t['symbol']})"
-                f" {t['shares']}股@{t['price']:.2f}"
-                f"{profit_str}{reason_str}"
-            )
+            lines.append(f"**{t.get('name', '')}**({t['symbol']}) {t['shares']}股@{t['price']:.2f}")
+            if profit_str:
+                lines.append(profit_str)
+            if human_reason:
+                lines.append(f"> {human_reason}")
+            lines.append("")
 
     if buys:
-        lines.append("**买入:**")
+        lines.append("**买入**")
+        lines.append("---")
         for t in buys:
             human_reason = _humanize_reason(t)
-            reason_str = f" — {human_reason}" if human_reason else ""
-            lines.append(
-                f"- {t.get('name', '')}({t['symbol']})"
-                f" {t['shares']}股@{t['price']:.2f}"
-                f" = {t['amount']:,.0f}元{reason_str}"
-            )
+            lines.append(f"**{t.get('name', '')}**({t['symbol']}) {t['shares']}股@{t['price']:.2f} = {t['amount']:,.0f}元")
+            if human_reason:
+                lines.append(f"> {human_reason}")
+            lines.append("")
 
     if not sells and not buys:
-        lines.append("**今日无交易**")
+        lines.append("")
         note = _get_decision_note()
         if note:
-            lines.append(f"> {note}")
+            lines.append(f"**今日无交易** — {note}")
+        else:
+            lines.append("**今日无交易**")
 
-    lines.append(f"\n现金{cash:,.0f} | 资产{total_value:,.0f}")
-    lines.append(f"今日{daily_ret:+.2%} | 累计{total_ret:+.2%}")
+    lines.append("---")
+    lines.append(f"现金 {cash:,.0f} | 总资产 {total_value:,.0f}")
+    lines.append(f"今日 {daily_ret:+.2%} | 累计 {total_ret:+.2%}")
 
     # AI 整体解读
     ai_summary = _ai_decision_summary(sells, buys, holdings, total_value, daily_ret)
     if ai_summary:
-        lines.append(f"\n> {ai_summary}")
+        lines.append(f"\n> AI解读: {ai_summary}")
 
-    # 持仓因子分析
+    # 持仓分析
     holding_analysis = _get_holding_analysis()
     if holding_analysis:
-        lines.append("\n**持仓分析:**")
+        lines.append("\n**持仓**")
+        lines.append("---")
         for ha in holding_analysis:
-            pnl_str = f"{ha['pnl_pct']:+.1f}%"
+            pnl_str = f"{ha['pnl_pct']:+.1f}%({ha['pnl_amount']:+,.0f}元)"
+            days_str = f"持有{ha.get('days_held', '?')}日"
+            lines.append(
+                f"**{ha['name']}**({ha['code']})"
+                f" {holdings.get(ha['code'], {}).get('shares', '?')}股"
+                f" | {pnl_str} | {days_str}"
+            )
             dim_str = _format_dimension_scores(ha.get("dimension_scores", {}), compact=True)
             sent_str = _format_sentiment(ha.get("sentiment", {}), compact=True)
-            line = f"- {ha['name']}({ha['code']}) {pnl_str}"
-            extras = []
             if dim_str:
-                extras.append(dim_str)
+                lines.append(f"  {dim_str}")
             if sent_str:
-                extras.append(sent_str)
-            if extras:
-                line += "\n  " + " | ".join(extras)
-            lines.append(line)
+                lines.append(f"  {sent_str}")
+            lines.append("")
         ai_hold = _ai_holding_summary(holding_analysis)
         if ai_hold:
             lines.append(f"> {ai_hold}")
@@ -617,11 +625,11 @@ def _calc_stats(snapshots: list, sells: list) -> dict:
         dd = (peak - tv) / peak if peak > 0 else 0
         max_dd = max(max_dd, dd)
 
-    # 夏普比率（与 backtest 统一口径）
+    # 夏普比率（简化：假设无风险利率0，日收益年化）
     if len(daily_returns) > 1:
         import numpy as np
-        from analytics.perf import sharpe_ratio
-        sharpe = sharpe_ratio(np.array(daily_returns))
+        arr = np.array(daily_returns)
+        sharpe = float(arr.mean() / arr.std() * (252 ** 0.5)) if arr.std() > 0 else 0
     else:
         sharpe = 0
 

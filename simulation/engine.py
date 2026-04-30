@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta
 
 import pandas as pd
+import numpy as np
 
 from simulation.matcher import fetch_quotes_batch, _calc_trade_days
 
@@ -28,6 +29,19 @@ logger = logging.getLogger(__name__)
 MARKET_OPEN = "09:30"
 MARKET_CLOSE = "15:00"
 BAR_INTERVAL_SECONDS = 180  # 3分钟轮询
+
+
+def _json_default(obj):
+    """JSON 序列化 numpy 类型"""
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 def is_trading_day() -> bool:
@@ -176,7 +190,7 @@ class SimEngine:
             save_snapshot, get_latest_snapshot,
         )
         from config.settings import (
-            INITIAL_CAPITAL, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
+            SIM_INITIAL_CAPITAL, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
             MAX_HOLDING_DAYS, NUM_POSITIONS, MIN_BUY_CAPITAL,
         )
 
@@ -191,7 +205,7 @@ class SimEngine:
         self.save_snapshot = save_snapshot
         self.get_latest_snapshot = get_latest_snapshot
 
-        self.initial_capital = INITIAL_CAPITAL
+        self.initial_capital = SIM_INITIAL_CAPITAL
         self.stop_loss_pct = STOP_LOSS_PCT
         self.take_profit_pct = TAKE_PROFIT_PCT
         self.max_holding_days = MAX_HOLDING_DAYS
@@ -862,7 +876,7 @@ class SimEngine:
 
         # 保存计划
         with open(self._plan_file, "w") as f:
-            json.dump(plan, f, ensure_ascii=False, indent=2)
+            json.dump(plan, f, ensure_ascii=False, indent=2, default=_json_default)
 
         sell_str = ", ".join(f"{s['code']}({s['reason']})" for s in plan["sells"])
         buy_str = ", ".join(f"{b['code']}({b.get('name', '')})" for b in plan["buys"])

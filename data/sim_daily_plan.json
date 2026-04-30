@@ -1,0 +1,151 @@
+{
+  "date": "2026-05-06",
+  "sells": [],
+  "buys": [
+    {
+      "code": "000404",
+      "name": "长虹华意",
+      "shares": 26400,
+      "price": 8.29,
+      "amount": 218856.0,
+      "reason": "因子#1 ML#2248 mom_20d:+17.2%|vol_10d:+4.4%|pe_ttm:11.4 预测20日收益:-4.8% 仓位44%",
+      "reason_data": {
+        "factor_rank": 1,
+        "ml_rank": 2248,
+        "in_both": false,
+        "weight": 0.4378,
+        "key_factors": {
+          "mom_20d": 0.17183098591549295,
+          "pe_ttm": 11.3592,
+          "pb": 1.3112,
+          "vol_10d": 0.0435164026051235,
+          "turnover_rate": 7.5472
+        },
+        "predicted_return": -0.047897543758153915,
+        "capital_flow": {
+          "net_mf_amount": -292.08,
+          "elg_net": -679.6700000000001,
+          "lg_net": -233.02999999999975,
+          "md_net": 1735.8199999999997,
+          "sm_net": -823.1099999999988
+        }
+      }
+    },
+    {
+      "code": "002154",
+      "name": "报 喜 鸟",
+      "shares": 26100,
+      "price": 4.19,
+      "amount": 109359.0,
+      "reason": "因子#2 ML#2262 mom_20d:+11.2%|vol_10d:+3.5%|pe_ttm:14.5 预测20日收益:-4.9% 仓位22%",
+      "reason_data": {
+        "factor_rank": 2,
+        "ml_rank": 2262,
+        "in_both": false,
+        "weight": 0.2189,
+        "key_factors": {
+          "mom_20d": 0.11232876712328754,
+          "pe_ttm": 14.5128,
+          "pb": 1.2151,
+          "vol_10d": 0.03533652566363075,
+          "turnover_rate": 12.1222
+        },
+        "predicted_return": -0.0492081418633461,
+        "capital_flow": {
+          "net_mf_amount": 5839.77,
+          "elg_net": -525.3299999999999,
+          "lg_net": -2258.0999999999995,
+          "md_net": -1017.8199999999997,
+          "sm_net": 3801.25
+        }
+      }
+    },
+    {
+      "code": "603518",
+      "name": "锦泓集团",
+      "shares": 7400,
+      "price": 9.87,
+      "amount": 73038.0,
+      "reason": "因子#3 ML#872 mom_20d:+6.1%|vol_10d:+1.5%|pe_ttm:13.2 预测20日收益:+0.2% 仓位15%",
+      "reason_data": {
+        "factor_rank": 3,
+        "ml_rank": 872,
+        "in_both": false,
+        "weight": 0.1461,
+        "key_factors": {
+          "mom_20d": 0.061315496098104605,
+          "pe_ttm": 13.2469,
+          "pb": 0.8556,
+          "vol_10d": 0.014588616095426213,
+          "turnover_rate": 5.8104
+        },
+        "predicted_return": 0.002216629683971405,
+        "capital_flow": {
+          "net_mf_amount": 2845.78,
+          "elg_net": 34.05000000000001,
+          "lg_net": 388.09000000000015,
+          "md_net": -1007.1300000000001,
+          "sm_net": 584.9899999999998
+        }
+      }
+    },
+    {
+      "code": "600694",
+      "name": "大商股份",
+      "shares": 2900,
+      "price": 18.27,
+      "amount": 52983.0,
+      "reason": "因子#4 ML#1840 mom_20d:+10.4%|vol_10d:+2.0%|pe_ttm:12.5 预测20日收益:-2.3% 仓位11%",
+      "reason_data": {
+        "factor_rank": 4,
+        "ml_rank": 1840,
+        "in_both": false,
+        "weight": 0.1095,
+        "key_factors": {
+          "mom_20d": 0.1043689320388348,
+          "pe_ttm": 12.5326,
+          "pb": 0.6853,
+          "vol_10d": 0.0197473270924835,
+          "turnover_rate": 1.538
+        },
+        "predicted_return": -0.023439424112439156,
+        "capital_flow": {
+          "net_mf_amount": 237.6,
+          "elg_net": 121.95,
+          "lg_net": -251.31000000000006,
+          "md_net": -389.89999999999986,
+          "sm_net": 519.2399999999998
+        }
+      }
+    },
+    {
+      "code": "000906",
+      "name": "浙商中拓",
+      "shares": 6900,
+      "price": 6.33,
+      "amount": 43677.0,
+      "reason": "因子#5 ML#1968 mom_20d:+8.0%|vol_10d:+3.5%|pe_ttm:20.3 预测20日收益:-2.9% 仓位9%",
+      "reason_data": {
+        "factor_rank": 5,
+        "ml_rank": 1968,
+        "in_both": false,
+        "weight": 0.0876,
+        "key_factors": {
+          "mom_20d": 0.08000000000000007,
+          "pe_ttm": 20.2818,
+          "pb": 0.8901,
+          "vol_10d": 0.034933829329673025,
+          "turnover_rate": 5.2832
+        },
+        "predicted_return": -0.02852853573858738,
+        "capital_flow": {
+          "net_mf_amount": 876.09,
+          "elg_net": -300.98,
+          "lg_net": 520.5799999999999,
+          "md_net": -190.1899999999996,
+          "sm_net": -29.420000000000073
+        }
+      }
+    }
+  ]
+}
