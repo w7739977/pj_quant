@@ -446,13 +446,99 @@ if sum(signals) < 2:
 
 后续可以叠加方案C的投票机制，在8维度分析中实现。
 
+### P1: 业界因子+ML权重方法论调研（2026-04-30）
+
+#### 核心认知：权重问题的本质
+
+当前做法是"因子排名(人工权重) → ML排名 → 人工公式合并"，这是早期思路。
+业界主流已转向 **"因子作为ML特征，模型自动学习权重"**：
+
+```
+pj_quant现状: 因子排名(人工2.0/1.5权重) + ML排名(人工公式) → final_score
+业界主流:    因子作为特征 → ML模型(XGBoost/LightGBM)直接输出预测收益 → 排序
+```
+
+pj_quant 的 XGBoost 已经在做这件事（20个因子→预测20日收益），
+问题在于选股时没把ML预测作为主决策依据，而是降级为辅助参考。
+
+#### 业界主流参考项目
+
+| 项目 | 方法 | 适用性 | 链接 |
+|------|------|--------|------|
+| **Qlib (微软)** | 因子→LightGBM/XGBoost预测收益→直接排序，无单独因子排名步骤 | 最成熟方案，架构参考 | [GitHub](https://github.com/microsoft/qlib) |
+| **TIDIBEI** | XGBoost+GBDT+RandomForest多模型，ICIR加权合成因子后再预测 | 因子合成阶段用ICIR | [GitHub](https://github.com/JoshuaQYH/TIDIBEI) |
+| **AShare-AI-Stock-Picker** | LightGBM+Optuna调参，直接用模型预测值排序 | 最接近的A股项目 | [GitHub](https://github.com/stlin256/AShare-AI-Stock-Picker) |
+| **QuantsPlaybook** | 券商金工研报复现，IC/ICIR加权+滚动训练 | 权重方法论参考 | [GitHub](https://github.com/hugo2046/QuantsPlaybook) |
+| **alphasickle** | 多因子全流程，沪深300增强，最大化IR分配权重 | 传统方法标杆 | [GitHub](https://github.com/phonegapX/alphasickle) |
+
+#### 三种主流权重方法论
+
+**方法1: IC/ICIR加权（传统但实用）**
+
+每个因子按历史预测能力分配权重：
+```python
+IC_mean = 过去N期因子与收益相关系数的均值
+IC_std  = 过去N期IC的标准差
+ICIR    = IC_mean / IC_std
+
+factor_weight = ICIR / sum(ICIR)    # 归一化
+composite_score = sum(factor_i × weight_i)
+```
+- 优点: 可解释性强，因子贡献清晰
+- 缺点: 只捕捉线性关系
+- 参考: [全自动AI因子实战](https://zhuanlan.zhihu.com/p/1958363452742558077)
+
+**方法2: ML端到端（Qlib方式，当前主流）**
+
+```python
+# 因子作为特征，模型直接预测收益
+features = [mom_20d, pe_ttm, pb, vol_10d, ...]  # 20个因子
+target = 未来20日收益率
+model.fit(features, target)
+predicted_return = model.predict(features)  # 直接用这个排序选股
+```
+- 优点: 捕捉非线性关系，自动学习因子权重
+- 缺点: 黑盒，需要防过拟合
+- 参考: [Qlib + LightGBM实战](https://vadim.blog/qlib-ai-quant-workflow-lightgbm)
+
+**方法3: 多模型集成（Stacking/Blending）**
+
+```python
+# 第一层: 多个模型独立预测
+pred_lgb = lgb_model.predict(features)
+pred_xgb = xgb_model.predict(features)
+pred_rf  = rf_model.predict(features)
+# 第二层: 加权合并
+final_pred = 0.4*pred_lgb + 0.35*pred_xgb + 0.25*pred_rf
+```
+- 参考: [量化金融面试题集](https://github.com/SoYuCry/awesome-quant-interview)
+
+#### 对pj_quant的改进建议（按复杂度递增）
+
+| 方案 | 改动量 | 思路 | 效果 |
+|------|--------|------|------|
+| **A. ML预测直接排序** | 最小 | 选股直接按 predicted_return 排序，去掉因子排名公式 | 从根本解决权重问题 |
+| **B. ICIR加权因子合成** | 中等 | 用历史ICIR替换人工权重(动量2.0/估值1.5) | 让因子权重更科学 |
+| **C. 多模型集成** | 较大 | 加LightGBM/RF，Blending后排序 | 提升预测稳定性 |
+
+**如果只改一处，建议走方案A**：现有因子排名和ML模型做的事高度重叠
+（都是用同样的20个因子），不如直接信任ML预测结果排序，因子排名降级为辅助展示。
+
+#### 华泰证券研究启示
+
+华泰金工对九坤Kaggle量化大赛的分析指出：
+- 弱因子对神经网络有效但对XGBoost无效，弱因子权重不宜过大
+- 因子合成和组合优化存在目标错配问题
+- 参考: AlphaNet ([GitHub](https://github.com/ryanluoli1/AlphaNet))
+
 ---
 
 ## 十、实现顺序
 
 1. 新建 `analysis/eight_dimensions.py` — 8维度分析骨架
 2. 修改 `data/fetcher.py` — 新增3个数据获取函数(大盘/盘口/历史资金流)
-3. 修改 `portfolio/allocator.py` — Step 7 集成
-4. 修改 `portfolio/reason_text.py` — 展示格式
-5. 修改 `simulation/engine.py` + `report.py` — 模拟盘集成
-6. 修改 `config/settings.py` — 常量
+3. 修改 `portfolio/allocator.py` — Step 7 集成8维度分析
+4. **修改 `portfolio/allocator.py` — 重构评分公式（P0/P1联动）**
+5. 修改 `portfolio/reason_text.py` — 展示格式
+6. 修改 `simulation/engine.py` + `report.py` — 模拟盘集成
+7. 修改 `config/settings.py` — 常量
