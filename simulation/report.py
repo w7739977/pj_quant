@@ -61,12 +61,15 @@ def _humanize_reason(trade: dict) -> str:
     from portfolio.reason_text import humanize_reason as _humanize
     result = _humanize(reason_data or {}, name=name, fallback_reason=reason)
 
-    # 维度得分（如有）
-    dim_scores = trade.get("dimension_scores")
-    if dim_scores:
-        dim_str = _format_dimension_scores(dim_scores, compact=True)
-        if dim_str:
-            result += f"\n    得分: {dim_str}"
+    # 维度得分详细明细（如有）
+    dim_scores = trade.get("dimension_scores") or (reason_data or {}).get("dimension_scores")
+    if dim_scores and isinstance(dim_scores, dict) and any(v is not None for v in dim_scores.values()):
+        # 只有包含完整 items 的 dimension_scores 才展示明细
+        first_val = next(iter(dim_scores.values()), None)
+        if isinstance(first_val, dict) and "items" in first_val:
+            dim_str = _format_dimension_scores(dim_scores, compact=True)
+            if dim_str:
+                result += f"\n    得分明细: {dim_str}"
 
     return result
 

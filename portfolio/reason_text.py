@@ -29,85 +29,237 @@ def humanize_reason(reason_data: dict, name: str = "",
         return ""
 
     parts = []
+    sub_lines = []  # 维度详情行，分行展示
 
-    # 排名
+    # ---- 排名 + 综合得分 ----
     factor_rank = reason_data.get("factor_rank")
     ml_rank = reason_data.get("ml_rank")
     in_both = reason_data.get("in_both", False)
+    final_score = reason_data.get("final_score")
+
+    header_parts = []
     if factor_rank is not None and ml_rank is not None:
         fr, mr = int(factor_rank), int(ml_rank)
         if in_both:
-            parts.append("多因子和ML模型均排名靠前，信号强烈")
-        elif fr <= 20:
-            parts.append(f"多因子排名第{fr}，技术面优势明显")
-        elif mr <= 20:
-            parts.append(f"ML模型预测排名第{mr}，看好后续走势")
+            header_parts.append(f"多因子#{fr}和ML#{mr}双重确认")
         else:
-            parts.append(f"多因子第{fr}、ML第{mr}")
-
-    # 关键因子
-    kf = reason_data.get("key_factors", {})
-
-    mom_20d = kf.get("mom_20d")
-    if mom_20d is not None:
+            header_parts.append(f"因子#{fr}、ML#{mr}")
+    if final_score is not None:
         try:
-            v = float(mom_20d) * 100
-            if v > 15:
-                parts.append(f"短期强势(20日涨{v:.0f}%)")
-            elif v > 5:
-                parts.append(f"温和上涨(20日涨{v:.0f}%)")
-            elif v < -10:
-                parts.append(f"短期弱势(20日跌{abs(v):.0f}%)")
+            header_parts.append(f"得分{float(final_score):.1f}")
         except (ValueError, TypeError):
             pass
+    if header_parts:
+        parts.append("、".join(header_parts))
 
-    pe = kf.get("pe_ttm")
-    if pe is not None:
-        try:
-            v = float(pe)
-            if v < 0:
-                parts.append("亏损股")
-            elif v < 15:
-                parts.append(f"低估值(PE仅{v:.0f})")
-            elif v > 50:
-                parts.append(f"估值偏高(PE={v:.0f})")
-        except (ValueError, TypeError):
-            pass
+    # ---- 维度得分（三维度分行展示） ----
+    dim_scores = reason_data.get("dimension_scores")
+    dim_details = reason_data.get("dimension_details")
 
-    pb = kf.get("pb")
-    if pb is not None:
-        try:
-            v = float(pb)
-            if v < 1:
-                parts.append(f"破净(PB={v:.1f})")
-            elif v < 3:
-                parts.append(f"估值合理(PB={v:.1f})")
-        except (ValueError, TypeError):
-            pass
+    if dim_scores and isinstance(dim_scores, dict):
+        for dim_name in ["技术面", "基本面", "资金面"]:
+            score = dim_scores.get(dim_name)
+            if score is None:
+                continue
+            try:
+                s = float(score)
+                grade = "优" if s >= 70 else ("良" if s >= 55 else "弱")
+            except (ValueError, TypeError):
+                continue
+
+            details = dim_details.get(dim_name, {}) if dim_details else {}
+            detail_str = _format_dim_detail(dim_name, details)
+
+            if detail_str:
+                sub_lines.append(f"  {dim_name}{s:.0f}分({grade})｜{detail_str}")
+            else:
+                sub_lines.append(f"  {dim_name}{s:.0f}分({grade})")
 
     # ML 预测收益
     pred_ret = reason_data.get("predicted_return")
     if pred_ret is not None:
         try:
             v = float(pred_ret) * 100
-            if v > 3:
-                parts.append(f"模型预测看涨(+{v:.0f}%)")
-            elif v < -3:
-                parts.append(f"模型预测有风险({v:.0f}%)")
+            if v > 5:
+                sub_lines.append(f"  ML预测｜看涨，预测20日+{v:.0f}%")
+            elif v > 0:
+                sub_lines.append(f"  ML预测｜偏多，预测20日+{v:.1f}%")
+            elif v > -3:
+                sub_lines.append(f"  ML预测｜中性，预测{v:+.1f}%")
+            else:
+                sub_lines.append(f"  ML预测｜偏空，预测20日{v:.0f}%，注意风险")
+        except (ValueError, TypeError):
+            pass
+    elif ml_rank is not None:
+        try:
+            mr = int(ml_rank)
+            if mr <= 100:
+                sub_lines.append(f"  ML预测｜排名靠前(#{mr})，看好")
+            elif mr > 2000:
+                sub_lines.append(f"  ML预测｜排名靠后(#{mr})，需关注风险")
         except (ValueError, TypeError):
             pass
 
-    # 主力资金流向（M5: 流入流出都展示明细）
+    # 主力资金流向
     cf = reason_data.get("capital_flow")
     if cf:
         flow_part = _format_capital_flow(cf)
         if flow_part:
-            parts.append(flow_part)
+            sub_lines.append(f"  资金面｜{flow_part}")
 
+    # ---- 拼装输出 ----
+    prefix = f"{name}：" if name else ""
+    all_parts = []
     if parts:
-        prefix = f"{name}：" if name else ""
-        return f"{prefix}{'，'.join(parts)}"
+        all_parts.append(f"{prefix}{'，'.join(parts)}")
+    for sl in sub_lines:
+        all_parts.append(sl)
+
+    if all_parts:
+        return "\n".join(all_parts)
     return fallback_reason
+
+
+def _fmt_amount(wan_yuan: float) -> str:
+    """万元 → 可读金额（无符号）"""
+    if wan_yuan >= 10000:
+        return f"{wan_yuan / 10000:.1f}亿"
+    elif wan_yuan >= 100:
+        return f"{wan_yuan:.0f}万"
+    return f"{wan_yuan:.1f}万"
+
+
+def _fmt_pct(v) -> str:
+    """浮点数 → 百分比字符串"""
+    try:
+        return f"{float(v) * 100:+.1f}%"
+    except (ValueError, TypeError):
+        return str(v)
+
+
+def _fmt_raw(v, digits=1) -> str:
+    """浮点数 → 原始值字符串"""
+    try:
+        return f"{float(v):.{digits}f}"
+    except (ValueError, TypeError):
+        return str(v)
+
+
+def _format_dim_detail(dim_name: str, details: dict) -> str:
+    """
+    将维度下的具体因子值翻译成可读指标
+
+    每个维度选取关键指标展示，附加定性标签
+    """
+    if not details:
+        return ""
+
+    items = []
+
+    if dim_name == "技术面":
+        mom20 = details.get("20日涨幅")
+        rsi = details.get("RSI")
+        vol = details.get("10日波动")
+        ma5 = details.get("MA5偏离")
+
+        if mom20 is not None:
+            try:
+                v = float(mom20) * 100
+                tag = "强势" if v > 15 else ("偏强" if v > 5 else ("震荡" if v > -5 else "弱势"))
+                items.append(f"20日涨{v:+.1f}%({tag})")
+            except (ValueError, TypeError):
+                pass
+        if rsi is not None:
+            try:
+                v = float(rsi)
+                tag = "超买" if v > 70 else ("超卖" if v < 30 else "")
+                items.append(f"RSI={v:.0f}" + (f"({tag})" if tag else ""))
+            except (ValueError, TypeError):
+                pass
+        if vol is not None:
+            try:
+                items.append(f"波动{float(vol)*100:.1f}%")
+            except (ValueError, TypeError):
+                pass
+        if ma5 is not None:
+            try:
+                items.append(f"MA5偏离{_fmt_pct(ma5)}")
+            except (ValueError, TypeError):
+                pass
+
+    elif dim_name == "基本面":
+        pe = details.get("PE(TTM)")
+        pb = details.get("PB")
+        tr = details.get("换手率")
+        vr = details.get("量比")
+
+        if pe is not None:
+            try:
+                v = float(pe)
+                if v < 0:
+                    items.append(f"PE亏损")
+                elif v < 15:
+                    items.append(f"PE={v:.0f}(低估值)")
+                elif v < 30:
+                    items.append(f"PE={v:.0f}(合理)")
+                else:
+                    items.append(f"PE={v:.0f}(偏高)")
+            except (ValueError, TypeError):
+                pass
+        if pb is not None:
+            try:
+                v = float(pb)
+                if v < 1:
+                    items.append(f"PB={v:.1f}(破净)")
+                elif v < 3:
+                    items.append(f"PB={v:.1f}(合理)")
+                else:
+                    items.append(f"PB={v:.1f}(偏高)")
+            except (ValueError, TypeError):
+                pass
+        if tr is not None:
+            try:
+                v = float(tr)
+                tag = "活跃" if v > 5 else ("清淡" if v < 1 else "正常")
+                items.append(f"换手率{v:.1f}%({tag})")
+            except (ValueError, TypeError):
+                pass
+        if vr is not None:
+            try:
+                items.append(f"量比{float(vr):.2f}")
+            except (ValueError, TypeError):
+                pass
+
+    elif dim_name == "资金面":
+        vs = details.get("量比")
+        at5 = details.get("5日均换手")
+        ta = details.get("换手加速")
+        vpd = details.get("量价背离")
+
+        if vs is not None:
+            try:
+                v = float(vs)
+                tag = "放量" if v > 2 else ("缩量" if v < 0.5 else "")
+                items.append(f"量比{v:.1f}" + (f"({tag})" if tag else ""))
+            except (ValueError, TypeError):
+                pass
+        if at5 is not None:
+            try:
+                items.append(f"5日均换手{float(at5):.1f}%")
+            except (ValueError, TypeError):
+                pass
+        if ta is not None:
+            try:
+                items.append(f"换手加速{_fmt_pct(ta)}")
+            except (ValueError, TypeError):
+                pass
+        if vpd is not None:
+            try:
+                items.append(f"量价背离{_fmt_pct(vpd)}")
+            except (ValueError, TypeError):
+                pass
+
+    return "，".join(items) if items else ""
 
 
 def _format_capital_flow(cf: dict) -> str:
@@ -132,15 +284,6 @@ def _format_capital_flow(cf: dict) -> str:
         return f"{main_str}({', '.join(detail_parts)})，{suffix}"
     suffix = "资金看好" if mf >= 0 else "注意风险"
     return f"{main_str}，{suffix}"
-
-
-def _fmt_amount(wan_yuan: float) -> str:
-    """万元 → 可读金额（无符号）"""
-    if wan_yuan >= 10000:
-        return f"{wan_yuan / 10000:.1f}亿"
-    elif wan_yuan >= 100:
-        return f"{wan_yuan:.0f}万"
-    return f"{wan_yuan:.1f}万"
 
 
 # ---- legacy: 正则解析旧格式 reason 字符串（仅作 fallback）----

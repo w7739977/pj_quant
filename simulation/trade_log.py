@@ -266,14 +266,14 @@ def save_sim_portfolio(state: dict):
 
 def load_sim_portfolio() -> dict:
     """加载模拟盘持仓"""
-    from config.settings import INITIAL_CAPITAL
+    from config.settings import SIM_INITIAL_CAPITAL
     if not os.path.exists(SIM_PORTFOLIO_PATH):
-        return {"cash": INITIAL_CAPITAL, "holdings": {}}
+        return {"cash": SIM_INITIAL_CAPITAL, "holdings": {}}
     try:
         with open(SIM_PORTFOLIO_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"cash": INITIAL_CAPITAL, "holdings": {}}
+        return {"cash": SIM_INITIAL_CAPITAL, "holdings": {}}
 
 
 # ============ 初始化 ============

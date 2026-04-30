@@ -427,21 +427,28 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         price_map[code] = float(row.get("price", 0))
         name_map[code] = name
 
-    per_stock = stock_capital / top_n
-
-    picks = []
+    # ---- 收益最大化: 按 final_score 加权分配资金 ----
+    valid_candidates = []
     for _, row in filtered.iterrows():
-        if len(picks) >= top_n:
-            break
-
         code = row["code"]
         price = price_map.get(code, 0)
         name = name_map.get(code, code)
-
         if price <= 0:
             continue
+        valid_candidates.append((row, code, price, name))
+        if len(valid_candidates) >= top_n:
+            break
 
-        share_info = calc_shares(per_stock, price)
+    if not valid_candidates:
+        return []
+
+    scores = np.array([float(r["final_score"]) for r, _, _, _ in valid_candidates])
+    alloc_weights = scores / scores.sum()
+
+    picks = []
+    for (row, code, price, name), w in zip(valid_candidates, alloc_weights):
+        alloc = round(stock_capital * w, -2)  # 百位取整
+        share_info = calc_shares(alloc, price)
         if share_info["shares"] < 100:
             continue
 
@@ -477,39 +484,85 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             if pred_ret is not None:
                 reason_parts.append(f"预测20日收益:{pred_ret:+.1%}")
 
+        reason_parts.append(f"仓位{w:.0%}")
         reason = " ".join(reason_parts)
+
+        # 安全转换 numpy 类型 → Python 原生类型（避免 JSON 序列化失败）
+        def _native(v):
+            if v is None:
+                return None
+            try:
+                if isinstance(v, (np.integer,)):
+                    return int(v)
+                if isinstance(v, (np.floating,)):
+                    return float(v)
+                if isinstance(v, np.bool_):
+                    return bool(v)
+            except (TypeError, ValueError):
+                pass
+            return v
+
+        dim_scores_raw = {
+            "技术面": _native(row.get("技术面_score")),
+            "基本面": _native(row.get("基本面_score")),
+            "资金面": _native(row.get("资金面_score")),
+        }
+        # 每个维度的具体因子值，用于推荐理由明细
+        dim_details = {
+            "技术面": {
+                "5日涨幅": _native(row.get("mom_5d")),
+                "20日涨幅": _native(row.get("mom_20d")),
+                "60日涨幅": _native(row.get("mom_60d")),
+                "RSI": _native(row.get("rsi_14")),
+                "10日波动": _native(row.get("vol_10d")),
+                "MA5偏离": _native(row.get("ma5_bias")),
+            },
+            "基本面": {
+                "PE(TTM)": _native(row.get("pe_ttm")),
+                "PB": _native(row.get("pb")),
+                "换手率": _native(row.get("turnover_rate")),
+                "量比": _native(row.get("volume_ratio")),
+            },
+            "资金面": {
+                "5日均换手": _native(row.get("avg_turnover_5d")),
+                "20日均换手": _native(row.get("avg_turnover_20d")),
+                "换手加速": _native(row.get("turnover_accel")),
+                "量比": _native(row.get("volume_surge")),
+                "量价背离": _native(row.get("vol_price_diverge")),
+            },
+        }
+        pred_ret_val = _native(
+            pred_row.iloc[0].get("predicted_return")
+            if not pred_row.empty else None
+        )
 
         picks.append({
             "code": code,
             "name": name,
-            "shares": share_info["shares"],
-            "price": price,
-            "amount": amount,
-            "cost": cost,
+            "shares": int(share_info["shares"]),
+            "price": float(price),
+            "amount": float(amount),
+            "cost": float(cost),
             "reason": reason,
             "reason_data": {
                 "factor_rank": factor_rank,
                 "ml_rank": ml_rank,
                 "in_both": bool(row["in_both"]),
+                "weight": round(float(w), 4),
+                "final_score": round(float(row["final_score"]), 2),
+                "dimension_scores": dim_scores_raw,
+                "dimension_details": dim_details,
                 "key_factors": {
-                    "mom_20d": row.get("mom_20d"),
-                    "pe_ttm": row.get("pe_ttm"),
-                    "pb": row.get("pb"),
-                    "vol_10d": row.get("vol_10d"),
-                    "turnover_rate": row.get("turnover_rate"),
+                    "mom_20d": _native(row.get("mom_20d")),
+                    "pe_ttm": _native(row.get("pe_ttm")),
+                    "pb": _native(row.get("pb")),
+                    "vol_10d": _native(row.get("vol_10d")),
+                    "turnover_rate": _native(row.get("turnover_rate")),
                 },
-                "predicted_return": (
-                    pred_row.iloc[0].get("predicted_return")
-                    if not pred_row.empty else None
-                ),
-                # capital_flow 在 Step 6 之后回填
+                "predicted_return": pred_ret_val,
             },
             "final_score": round(float(row["final_score"]), 2),
-            "dimension_scores": {
-                "技术面": row.get("技术面_score", None),
-                "基本面": row.get("基本面_score", None),
-                "资金面": row.get("资金面_score", None),
-            },
+            "dimension_scores": dim_scores_raw,
         })
 
     # Step 6: 获取买入候选股的主力资金流向（补充展示，不影响选股）
@@ -623,15 +676,18 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
         # simulate 模式: 已执行卖出，tracker.cash 是实际可用资金
         available_cash = tracker.cash
     else:
-        # 非 simulate: 用预估卖出回笼资金
-        available_cash = tracker.cash
-        for a in sell_actions:
-            sell_cost = estimate_sell_cost(a["amount"])
-            available_cash += a["amount"] - sell_cost
+        # 纯推荐模式: 用总资产作为选股资金基准
+        available_cash = total_capital
 
     # 已有持仓数量
-    current_holdings = len(tracker.holdings)  # simulate 下已剔除卖出的
-    slots = max(0, NUM_POSITIONS - current_holdings)
+    if simulate:
+        # simulate 模式: 已有持仓占用仓位，只推荐空余槽位
+        current_holdings = len(tracker.holdings)
+        slots = max(0, NUM_POSITIONS - current_holdings)
+    else:
+        # 纯推荐模式: 不受已有持仓影响，始终推荐 NUM_POSITIONS 只
+        current_holdings = 0
+        slots = NUM_POSITIONS
 
     buy_actions = []
     if slots > 0 and available_cash >= 5000:
