@@ -4,7 +4,7 @@
 
 ### 背景
 
-模拟盘初始资金从2万调整为50万，同步优化选股分配策略和推荐理由展示。
+模拟盘和实盘推荐初始资金从2万调整为50万，同步优化选股分配策略和推荐理由展示。
 
 ### 改动汇总
 
@@ -54,6 +54,13 @@
 | `simulation/engine.py` | 用 SIM_INITIAL_CAPITAL + _json_default |
 | `simulation/trade_log.py` | 默认仓位用 SIM_INITIAL_CAPITAL |
 | `simulation/report.py` | dimension_scores 兼容 |
+
+### 部署操作
+
+- 模拟盘：`sim_portfolio.json` 重置为50万空仓，`sim_trading.db` 清空历史数据
+- 实盘推荐：`quant.db` portfolio 表更新为50万空仓
+- 旧模拟盘引擎 kill 后重新启动（新格式+50万仓位）
+- cherry-pick 到 main 分支（`009c9ec`），解决6个文件冲突后推送
 
 ## 2026-04-27 humanize_reason 结构化重构 + Py3.9 兼容
 
