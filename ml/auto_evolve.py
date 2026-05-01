@@ -2,12 +2,11 @@
 自动进化模块 — 闭环迭代
 
 每月自动执行一次:
-1. 更新股票池 + 行情数据
-2. 重新计算因子（含情绪）
-3. 训练新模型
-4. 回测对比新旧模型
-5. 新模型更优 → 自动替换；否则保留旧模型
-6. 微信推送进化报告
+1. 获取旧模型基准
+2. 计算因子（含情绪，纯本地 SQLite）
+3. 准备训练数据（滚动截面，纯本地）
+4. 训练新模型（自动对比 + 版本管理）
+5. 微信推送进化报告
 
 用法:
   python main.py evolve          # 手动触发
@@ -17,9 +16,7 @@
 
 import os
 import json
-import time
 import logging
-import numpy as np
 import pandas as pd
 from datetime import datetime
 
@@ -34,17 +31,15 @@ def _ensure_dirs():
 
 def evolve(push: bool = False) -> dict:
     """
-    执行一次自动进化
+    模型自动进化 — 纯本地数据路径
 
-    Returns
-    -------
-    dict: 完整进化报告
+    流程: 读旧模型 R² → 计算因子(本地SQLite) → 准备训练数据(滚动截面)
+        → 训练新模型(自动版本管理) → 推送报告
     """
     from ml.ranker import (
         train_model, get_model_info, PRODUCTION_MODEL, FEATURE_COLS,
     )
-    from factors.calculator import compute_stock_pool_factors, _batch_sentiment_factors
-    from factors.data_loader import get_small_cap_stocks
+    from factors.calculator import compute_stock_pool_factors
     from config.settings import INITIAL_CAPITAL
 
     _ensure_dirs()
@@ -52,146 +47,65 @@ def evolve(push: bool = False) -> dict:
     report = {
         "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "steps": {},
-        "decision": "",
+        "decision": None,
     }
 
     print("=" * 60)
-    print(f"自动进化开始 - {report['start_time']}")
+    print("模型自动进化")
     print("=" * 60)
 
-    # ============ Step 1: 旧模型基准 ============
-    print("\n[1/5] 获取旧模型基准...")
+    # === Step 1: 旧模型基准 ===
+    print("\n[1/4] 获取旧模型基准...")
     old_info = get_model_info()
-    old_r2 = old_info.get("current", {}).get("cv_r2_mean", None)
+    old_r2 = old_info.get("current", {}).get("cv_r2_mean")
     print(f"  当前模型 R²: {old_r2}")
-    print(f"  历史版本数: {old_info.get('version_count', 0)}")
     report["steps"]["old_model"] = {
         "old_r2": old_r2,
         "version_count": old_info.get("version_count", 0),
     }
 
-    # ============ Step 2: 获取股票池 + 行情数据 ============
-    print("\n[2/5] 获取股票池 + 行情数据...")
-    pool = get_small_cap_stocks()
-    if pool.empty:
-        # AKShare 限流时，使用 BaoStock 获取沪深主板股票列表
-        import baostock as bs
-        lg = bs.login()
-        rs = bs.query_stock_basic()
-        stock_list = []
-        while rs.error_code == "0" and rs.next():
-            row = rs.get_row_data()
-            # row: [code, name, ipoDate, outDate, type, tradeStatus]
-            # type: 1=股票, 2=指数; tradeStatus: 1=上市
-            code = row[0] if len(row) > 0 else ""
-            name = row[1] if len(row) > 1 else ""
-            stype = row[4] if len(row) > 4 else ""
-            trade_status = row[5] if len(row) > 5 else ""
-            # type=1(股票) + tradeStatus=1(上市), 排除 ST/退市/北交所/科创板
-            if stype == "1" and trade_status == "1" and "ST" not in name and "退" not in name:
-                pure_code = code.split(".")[-1] if "." in code else code
-                if pure_code.startswith(("8", "688", "9")):
-                    continue
-                stock_list.append(pure_code)
-        bs.logout()
-        symbols = stock_list  # 全量股票
-    else:
-        symbols = pool["code"].tolist()
-    print(f"  股票池: {len(symbols)} 只")
-    report["steps"]["stock_pool"] = {"count": len(symbols)}
+    # === Step 2: 计算因子（含情绪） ===
+    print("\n[2/4] 计算因子（含情绪）...")
+    factor_df = compute_stock_pool_factors(skip_sentiment=False)
 
-    if len(symbols) < 20:
-        report["decision"] = "ABORT: 股票池不足 20 只，无法训练"
+    if factor_df.empty:
+        report["decision"] = "ABORT: 因子计算失败 / 股票池为空"
         print(f"  ✗ {report['decision']}")
         return _finish_report(report, push)
 
-    # ============ Step 3: 滚动因子计算 ============
-    print("\n[3/5] 滚动计算因子（含情绪）...")
-    import baostock as bs
+    pool_size = len(factor_df)
+    has_sent = int((factor_df.get("sentiment_score", 0).fillna(0) != 0).sum())
+    print(f"  股票池: {pool_size} 只")
+    print(f"  情绪覆盖: {has_sent}/{pool_size}")
+    report["steps"]["stock_pool"] = {"count": pool_size}
+    report["steps"]["factors"] = {"sentiment_coverage": f"{has_sent}/{pool_size}"}
 
-    bs.login()
-    records = []
-    success = 0
-    for i, sym in enumerate(symbols[:200]):  # 最多 200 只，控制时间
-        try:
-            prefix = "sh" if sym.startswith("6") else "sz"
-            rs = bs.query_history_k_data_plus(
-                f"{prefix}.{sym}",
-                "date,open,high,low,close,volume,turn,pctChg",
-                start_date="2024-06-01", end_date=datetime.now().strftime("%Y-%m-%d"),
-                frequency="d", adjustflag="2",
-            )
-            rows = []
-            while rs.error_code == "0" and rs.next():
-                rows.append(rs.get_row_data())
-            if not rows:
-                continue
+    if pool_size < 20:
+        report["decision"] = f"ABORT: 股票池不足 20 只 ({pool_size})"
+        print(f"  ✗ {report['decision']}")
+        return _finish_report(report, push)
 
-            df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close",
-                                              "volume", "turnover", "pct_chg"])
-            for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-            df["date"] = pd.to_datetime(df["date"])
+    # === Step 3: 准备训练数据（滚动截面，纯本地） ===
+    print("\n[3/4] 准备训练数据（滚动截面）...")
+    from ml.ranker import prepare_training_data
+    train_df = prepare_training_data(factor_df)
 
-            if len(df) < 80:
-                continue
-
-            from factors.calculator import (
-                calc_momentum, calc_volatility, calc_turnover_factor,
-                calc_volume_price, calc_technical,
-            )
-
-            # 滚动截面，每 20 天一个样本
-            for end_idx in range(60, len(df) - 20, 20):
-                window = df.iloc[:end_idx + 1]
-                fwd = df.iloc[end_idx:end_idx + 21]
-                if len(fwd) < 21:
-                    continue
-                forward_return = float(fwd.iloc[-1]["close"]) / float(fwd.iloc[0]["close"]) - 1.0
-
-                factors = {"code": sym}
-                factors.update(calc_momentum(window))
-                factors.update(calc_volatility(window))
-                factors.update(calc_turnover_factor(window))
-                factors.update(calc_volume_price(window))
-                factors.update(calc_technical(window))
-                for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]:
-                    factors[col] = np.nan
-                records.append({"code": sym, "label": forward_return, **factors})
-            success += 1
-        except Exception:
-            continue
-
-        if (i + 1) % 50 == 0:
-            print(f"  已处理 {i+1}/{min(len(symbols), 200)}")
-
-    bs.logout()
-
-    train_df = pd.DataFrame(records)
-    print(f"  训练样本: {len(train_df)} 条 ({success} 只股票)")
-    report["steps"]["factors"] = {
-        "train_samples": len(train_df),
-        "stocks_processed": success,
-    }
-
-    if len(train_df) < 50:
+    if train_df.empty or len(train_df) < 50:
         report["decision"] = f"ABORT: 训练样本不足 ({len(train_df)} < 50)"
+        report["steps"]["factors"]["train_samples"] = len(train_df)
         print(f"  ✗ {report['decision']}")
         return _finish_report(report, push)
 
-    # 批量情绪打标
-    print("  计算情绪因子...")
-    unique_codes = train_df["code"].unique()
-    mini_df = pd.DataFrame({"code": unique_codes})
-    sent_df = _batch_sentiment_factors(mini_df)
-    sent_map = dict(zip(sent_df["code"], sent_df["sentiment_score"]))
-    train_df["sentiment_score"] = train_df["code"].map(sent_map).fillna(0)
-    has_sent = sum(1 for v in sent_map.values() if v != 0)
-    print(f"  情绪数据: {has_sent}/{len(unique_codes)} 只有新闻")
-    report["steps"]["factors"]["sentiment_coverage"] = f"{has_sent}/{len(unique_codes)}"
+    # 注入情绪因子（截面均值，与 ranker.predict 一致）
+    if "sentiment_score" not in train_df.columns:
+        sent_map = dict(zip(factor_df["code"], factor_df.get("sentiment_score", 0)))
+        train_df["sentiment_score"] = train_df["code"].map(sent_map).fillna(0)
 
-    # ============ Step 4: 训练新模型（自动对比） ============
-    print("\n[4/5] 训练新模型（自动对比旧模型）...")
+    print(f"  训练样本: {len(train_df)} 条")
+    report["steps"]["factors"]["train_samples"] = len(train_df)
+
+    # === Step 4: 训练新模型（自动版本管理） ===
+    print("\n[4/4] 训练新模型...")
     result = train_model(train_df)
 
     if not result:
@@ -208,15 +122,10 @@ def evolve(push: bool = False) -> dict:
         "train_samples": result["train_samples"],
         "is_new_best": is_best,
         "old_r2": old_r2,
+        "top_factors": list(result.get("feature_importance", {}).keys())[:5],
     }
 
-    if is_best:
-        print(f"  ✓ 新模型 R²={new_r2:.4f} ≥ 旧模型 R²={old_r2}，已上线!")
-    else:
-        print(f"  → 新模型 R²={new_r2:.4f} < 旧模型 R²={old_r2}，保留旧模型")
-
-    # ============ Step 5: 因子重要性变化 ============
-    print("\n[5/5] 因子分析...")
+    # 因子重要性
     importance = result.get("feature_importance", {})
     sent_rank = list(importance.keys()).index("sentiment_score") + 1 if "sentiment_score" in importance else "N/A"
     print(f"  情绪因子排名: #{sent_rank}/{len(importance)}")
@@ -227,14 +136,12 @@ def evolve(push: bool = False) -> dict:
     report["steps"]["factors"]["top5"] = list(importance.items())[:5]
     report["steps"]["factors"]["sentiment_rank"] = sent_rank
 
-    # ============ 决策总结 ============
-    report["decision"] = "NEW_MODEL_DEPLOYED" if is_best else "OLD_MODEL_RETAINED"
-    report["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    print(f"\n{'='*60}")
-    print(f"进化决策: {'✓ 新模型已上线' if is_best else '→ 保留旧模型'}")
-    print(f"新 R²={new_r2:.4f} vs 旧 R²={old_r2}")
-    print(f"{'='*60}")
+    if is_best:
+        report["decision"] = f"✓ 上线新模型 (R² {old_r2}→{new_r2})"
+        print(f"  ✓ 新模型 R²={new_r2:.4f} ≥ 旧模型 R²={old_r2}，已上线!")
+    else:
+        report["decision"] = f"⚠ 保留旧模型 (新 R²={new_r2} < 旧 {old_r2})"
+        print(f"  → 新模型 R²={new_r2:.4f} < 旧模型 R²={old_r2}，保留旧模型")
 
     # 保存进化日志
     _save_evolve_log(report)
