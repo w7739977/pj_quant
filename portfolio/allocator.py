@@ -588,6 +588,15 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         except Exception as e:
             logger.warning(f"资金流向获取失败(非关键): {e}")
 
+    # === Step 7: 8 维度深度分析 ===
+    if picks:
+        try:
+            from analysis.eight_dimensions import enrich_picks_with_dimensions
+            picks = enrich_picks_with_dimensions(picks, factor_df=candidates)
+            print(f"  8维度分析: {len(picks)} 只完成")
+        except Exception as e:
+            logger.warning(f"8维度分析失败(非关键): {e}")
+
     return picks
 
 

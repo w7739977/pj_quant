@@ -510,6 +510,111 @@ def _fetch_capital_flow_eastmoney(symbols: list) -> dict:
     return result
 
 
+# ============ 指数/盘口/资金流历史 ============
+
+def fetch_index_realtime() -> dict:
+    """
+    获取上证/深证/创业板指数实时行情（腾讯接口）
+    用途: 维度 2 大盘分析
+    Returns: {symbol: {price, change_pct, volume, ...}}
+    """
+    INDEX_CODES = {
+        "sh000001": "上证指数",
+        "sz399001": "深证成指",
+        "sz399006": "创业板指",
+    }
+    url = f"http://qt.gtimg.cn/q={','.join(INDEX_CODES.keys())}"
+    try:
+        resp = requests.get(url, timeout=5)
+        result = {}
+        for line in resp.text.strip().split(";"):
+            line = line.strip()
+            if '=""' in line or not line:
+                continue
+            parts = line.split('"')[1].split("~")
+            if len(parts) < 33:
+                continue
+            code_with_market = line.split("=")[0].split("_")[-1]
+            result[code_with_market] = {
+                "name": parts[1],
+                "price": float(parts[3]),
+                "change_pct": float(parts[32]) if parts[32] else 0,
+                "volume": float(parts[36]) if parts[36] else 0,
+            }
+        return result
+    except Exception as e:
+        logger.warning(f"指数行情失败: {e}")
+        return {}
+
+
+def fetch_order_book(symbol: str) -> dict:
+    """
+    获取五档盘口（新浪接口，免费但偶尔限流）
+    用途: 维度 8 订单分析
+    Returns: {bid1, bid1_vol, ask1, ask1_vol, ..., bid_total, ask_total}
+    """
+    prefix = "sh" if symbol.startswith(("6", "5")) else "sz"
+    url = f"http://hq.sinajs.cn/list={prefix}{symbol}"
+    headers = {"Referer": "https://finance.sina.com.cn"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        resp.encoding = "gbk"
+        line = resp.text.strip()
+        if '=""' in line:
+            return {}
+        fields = line.split('"')[1].split(",")
+        if len(fields) < 32:
+            return {}
+        # 新浪格式: bid1_vol(10), bid1(11), ask1_vol(20), ask1(21)
+        return {
+            "bid1": float(fields[11]) if fields[11] else 0,
+            "bid1_vol": int(fields[10]) if fields[10] else 0,
+            "ask1": float(fields[21]) if fields[21] else 0,
+            "ask1_vol": int(fields[20]) if fields[20] else 0,
+            "bid_total": sum(int(fields[i]) for i in (10, 12, 14, 16, 18) if fields[i]),
+            "ask_total": sum(int(fields[i]) for i in (20, 22, 24, 26, 28) if fields[i]),
+        }
+    except Exception as e:
+        logger.warning(f"五档盘口失败 {symbol}: {e}")
+        return {}
+
+
+def fetch_capital_flow_history(symbol: str, days: int = 5) -> list:
+    """
+    获取近 N 日资金流向（东方财富接口）
+    用途: 维度 6 资金流增强（看趋势）
+    Returns: [{date, main_inflow, elg_net, lg_net}, ...]
+    """
+    secid = _code_to_secid(symbol)
+    url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+    params = {
+        "secid": secid,
+        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+        "klt": 101,
+        "lmt": days,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=5)
+        klines = resp.json().get("data", {}).get("klines", [])
+        result = []
+        for line in klines[-days:]:
+            parts = line.split(",")
+            if len(parts) < 6:
+                continue
+            result.append({
+                "date": parts[0],
+                "main_inflow": float(parts[1]),  # 主力净流入(元)
+                "elg_net": float(parts[5]),       # 超大单净流入
+                "lg_net": float(parts[4]),        # 大单净流入
+            })
+        return result
+    except Exception as e:
+        logger.warning(f"资金流历史失败 {symbol}: {e}")
+        return []
+
+
 # ============ 保留兼容旧接口 ============
 
 def fetch_etf_realtime(symbol: str) -> dict:
