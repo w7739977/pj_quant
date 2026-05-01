@@ -353,14 +353,9 @@ def main():
         if "--limit" in sys.argv:
             idx = sys.argv.index("--limit")
             _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
-        if "--tushare" in sys.argv:
-            from data.tushare_daily import run as tushare_daily_run
-            _incremental = "--incremental" in sys.argv
-            tushare_daily_run(limit=_limit, incremental=_incremental)
-        else:
-            from data.bulk_fetcher import bulk_fetch
-            _refresh = "--refresh" in sys.argv
-            bulk_fetch(limit=_limit, refresh=_refresh)
+        from data.tushare_daily import run as tushare_daily_run
+        _incremental = "--incremental" in sys.argv
+        tushare_daily_run(limit=_limit, incremental=_incremental)
     elif command == "portfolio":
         run_portfolio()
     elif command == "deploy":

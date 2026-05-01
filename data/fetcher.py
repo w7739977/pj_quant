@@ -295,52 +295,13 @@ def fetch_daily_akshare(symbol: str, start_date: str, end_date: str) -> pd.DataF
     return pd.DataFrame()
 
 
-# ============ BaoStock 数据源 ============
-
-def fetch_daily_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """BaoStock 获取日线 (无频率限制，适合批量回填)"""
-    import baostock as bs
-    import contextlib
-    import io
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        lg = bs.login()
-    if lg.error_code != "0":
-        raise ConnectionError(f"Baostock login failed: {lg.error_msg}")
-
-    try:
-        bs_code = _code_to_prefix(symbol)
-        rs = bs.query_history_k_data_plus(
-            bs_code,
-            "date,open,high,low,close,volume,turn,pctChg",
-            start_date=start_date, end_date=end_date,
-            frequency="d", adjustflag="2",
-        )
-        rows = []
-        while rs.error_code == "0" and rs.next():
-            rows.append(rs.get_row_data())
-    finally:
-        with contextlib.redirect_stdout(io.StringIO()):
-            bs.logout()
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"])
-    for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").reset_index(drop=True)
-    return df
-
-
 # ============ 统一入口（多源自动降级） ============
 
 def fetch_etf_daily(symbol: str, start_date: str, end_date: str = None) -> pd.DataFrame:
     """
     获取日线数据 — 多数据源自动降级
 
-    优先级: 东方财富直连 → AKShare → BaoStock
+    优先级: 东方财富直连 → AKShare
     """
     if end_date is None:
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -362,15 +323,6 @@ def fetch_etf_daily(symbol: str, start_date: str, end_date: str = None) -> pd.Da
             return df
     except Exception as e:
         logger.warning(f"[AKShare] {symbol} 失败: {e}")
-
-    # 3. BaoStock (最稳定但最慢)
-    try:
-        df = fetch_daily_baostock(symbol, start_date, end_date)
-        if len(df) > 0:
-            logger.info(f"[BaoStock] {symbol}: {len(df)} 条")
-            return df
-    except Exception as e:
-        logger.warning(f"[BaoStock] {symbol} 失败: {e}")
 
     raise RuntimeError(f"所有数据源均获取失败: {symbol}")
 

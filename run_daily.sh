@@ -22,7 +22,7 @@ echo "========== $DATE 日常执行 ==========" | tee -a "$LOG_FILE"
 
 # 阶段零：增量数据拉取（preflight 之前，保证数据新鲜）
 echo "[$(date +%H:%M:%S)] 增量数据拉取..." | tee -a "$LOG_FILE"
-if python3 main.py fetch-all --tushare --incremental 2>&1 | tee -a "$LOG_FILE"; then
+if python3 main.py fetch-all --incremental 2>&1 | tee -a "$LOG_FILE"; then
     echo "[$(date +%H:%M:%S)] 数据拉取完成" | tee -a "$LOG_FILE"
 else
     echo "[$(date +%H:%M:%S)] 增量数据拉取失败，推送告警" | tee -a "$LOG_FILE"
