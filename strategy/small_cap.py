@@ -79,12 +79,11 @@ class SmallCapStrategy(BaseStrategy):
             if direction == -1:
                 rank = 1 - rank
 
-            # 权重: 动量和估值最重要
-            weight = 1.0
-            if "mom" in factor_name:
-                weight = 2.0  # 动量因子权重加倍
-            elif "pe" in factor_name or "pb" in factor_name:
-                weight = 1.5  # 估值因子权重
+            # 权重: 中性化后已等量级，仅情绪因子噪声大需降权
+            if "sentiment" in factor_name:
+                weight = 0.5
+            else:
+                weight = 1.0
 
             scores += rank.fillna(0.5) * weight
 

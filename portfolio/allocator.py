@@ -380,17 +380,22 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
     except Exception as e:
         logger.warning(f"ML 预测失败: {e}")
 
-    # Step 4: 综合排名
+    # Step 4: 综合排名（ML 主导 70% + 多因子 30%）
     candidates = scored.head(50).copy()
     candidates["ml_rank"] = candidates["code"].map(ml_rank_map).fillna(999).astype(int)
+    candidates["predicted_return"] = candidates["code"].map(
+        dict(zip(pred["code"], pred["predicted_return"])) if not pred.empty else {}
+    ).fillna(0)
     candidates["in_both"] = (
         (candidates["factor_rank"] <= 20) & (candidates["ml_rank"] <= 20)
     ).astype(int)
-    candidates["final_score"] = (
-        1.0 / candidates["factor_rank"] * 100
-        + 1.0 / candidates["ml_rank"] * 50
-        + candidates["in_both"] * 20
-    )
+
+    # ML 主导综合得分
+    ml_pred = candidates["predicted_return"].fillna(0)
+    factor_score = candidates["score"].fillna(0)
+    ml_norm = (ml_pred - ml_pred.mean()) / (ml_pred.std() + 1e-8)
+    factor_norm = (factor_score - factor_score.mean()) / (factor_score.std() + 1e-8)
+    candidates["final_score"] = ml_norm * 0.7 + factor_norm * 0.3
     candidates = candidates.sort_values("final_score", ascending=False)
 
     # Step 4.5: 计算各维度得分拆解（技术面/基本面/资金面）
