@@ -356,6 +356,9 @@ def main():
         from data.tushare_daily import run as tushare_daily_run
         _incremental = "--incremental" in sys.argv
         tushare_daily_run(limit=_limit, incremental=_incremental)
+    elif command == "fetch-industry":
+        from data.tushare_industry import run
+        run()
     elif command == "portfolio":
         run_portfolio()
     elif command == "deploy":

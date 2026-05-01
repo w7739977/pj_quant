@@ -118,6 +118,24 @@ def prepare_training_data(
     train_df = pd.DataFrame(records)
     logger.info(f"  训练样本生成完成: {len(train_df)} 条 ({len(symbols)} 只股票)")
 
+    if train_df.empty:
+        return train_df
+
+    # === 因子预处理: winsorize + zscore + industry neutralize ===
+    from factors.calculator import neutralize_factors
+    from data.tushare_industry import get_industry_for_codes
+
+    # 注入行业字段
+    industry_map = get_industry_for_codes(train_df["code"].tolist())
+    train_df["industry"] = train_df["code"].map(industry_map).fillna("未知")
+
+    # 因子列（不含 label/code/industry）
+    factor_cols = [c for c in train_df.columns
+                   if c not in ("label", "code", "industry")]
+
+    train_df = neutralize_factors(train_df, factor_cols)
+    logger.info(f"  因子中性化完成 (winsorize + zscore + industry neutralize)")
+
     # 打印基本面因子使用率
     fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]
     for col in fund_cols:
@@ -317,6 +335,16 @@ def predict(factor_df: pd.DataFrame) -> pd.DataFrame:
 
     model = XGBRegressor()
     model.load_model(model_path)
+
+    # === 因子预处理: neutralize ===
+    from factors.calculator import neutralize_factors
+    if "industry" not in factor_df.columns:
+        from data.tushare_industry import get_industry_for_codes
+        ind_map = get_industry_for_codes(factor_df["code"].tolist())
+        factor_df = factor_df.copy()
+        factor_df["industry"] = factor_df["code"].map(ind_map).fillna("未知")
+
+    factor_df = neutralize_factors(factor_df, FEATURE_COLS)
 
     X = factor_df[FEATURE_COLS].copy()
     X = X.fillna(X.median())

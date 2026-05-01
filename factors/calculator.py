@@ -307,6 +307,11 @@ def compute_stock_pool_factors(
     if df.empty:
         return df
 
+    # === 注入行业字段 ===
+    from data.tushare_industry import get_industry_for_codes
+    industry_map = get_industry_for_codes(df["code"].tolist())
+    df["industry"] = df["code"].map(industry_map).fillna("未知")
+
     # 情绪因子: 批量获取个股新闻标题，一次性让 flash 打标
     if skip_sentiment:
         df["sentiment_score"] = np.nan
@@ -321,3 +326,80 @@ def compute_stock_pool_factors(
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+# ============ 因子预处理工具 ============
+
+def winsorize_cross_section(df: pd.DataFrame, cols: list,
+                            lower: float = 0.01, upper: float = 0.99) -> pd.DataFrame:
+    """
+    极值处理（Qlib 标准）— 按截面 1%/99% 分位数 winsorize
+
+    防止异常值（停牌/重组复牌）拖偏 ML 训练
+    注意：默认假设 df 已是单一截面（同一 date 的所有股票）
+    """
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        if s.notna().sum() < 10:
+            continue
+        lo, hi = s.quantile([lower, upper])
+        df[col] = s.clip(lower=lo, upper=hi)
+    return df
+
+
+def cross_sectional_zscore(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """
+    截面 Z-score 标准化（Qlib CSZScoreNorm 等价实现）
+
+    每个因子 (x - mean) / std，让所有因子量级一致
+    注意：df 必须是单一截面
+    """
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        if s.notna().sum() < 10:
+            continue
+        m, sd = s.mean(), s.std()
+        if sd > 1e-8:
+            df[col] = (s - m) / sd
+        else:
+            df[col] = 0.0
+    return df
+
+
+def industry_neutralize(df: pd.DataFrame, cols: list,
+                        industry_col: str = "industry") -> pd.DataFrame:
+    """
+    行业中性化（信达金工/中金标配）— 按行业分组排名归一化到 0~1
+
+    保留行业内相对优势，去除行业 beta
+    """
+    if industry_col not in df.columns:
+        # 无行业字段，跳过中性化
+        return df
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        # 按行业分组排名（pct=True 得到 0-1 分位数）
+        df[col] = s.groupby(df[industry_col]).rank(pct=True, na_option="keep")
+    return df
+
+
+def neutralize_factors(df: pd.DataFrame, factor_cols: list,
+                       industry_col: str = "industry") -> pd.DataFrame:
+    """
+    一站式因子预处理: winsorize → zscore → industry_neutralize
+
+    用于训练数据生成 + 实时预测前
+    """
+    df = winsorize_cross_section(df, factor_cols)
+    df = cross_sectional_zscore(df, factor_cols)
+    df = industry_neutralize(df, factor_cols, industry_col)
+    return df
