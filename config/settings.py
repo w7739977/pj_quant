@@ -34,7 +34,7 @@ BACKTEST_END = "2025-12-31"
 # ============ 策略参数 ============
 MOMENTUM_LOOKBACK_DAYS = 20
 REBALANCE_DAYS = 40
-NUM_POSITIONS = 5
+NUM_POSITIONS = 10
 
 # ============ 止损止盈参数 ============
 STOP_LOSS_PCT = -0.08
