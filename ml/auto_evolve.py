@@ -40,7 +40,6 @@ def evolve(push: bool = False) -> dict:
         train_model, get_model_info, PRODUCTION_MODEL, FEATURE_COLS,
     )
     from factors.calculator import compute_stock_pool_factors
-    from config.settings import INITIAL_CAPITAL
 
     _ensure_dirs()
 
@@ -96,8 +95,10 @@ def evolve(push: bool = False) -> dict:
         print(f"  ✗ {report['decision']}")
         return _finish_report(report, push)
 
-    # 注入情绪因子（截面均值，与 ranker.predict 一致）
-    if "sentiment_score" not in train_df.columns:
+    # 用最新截面情绪覆盖训练数据的 NaN
+    # (prepare_training_data 内部仅写 NaN 占位，这里用 factor_df 的实际值替换，
+    #  保持训练特征与 predict 时口径一致)
+    if "sentiment_score" in train_df.columns and train_df["sentiment_score"].isna().all():
         sent_map = dict(zip(factor_df["code"], factor_df.get("sentiment_score", 0)))
         train_df["sentiment_score"] = train_df["code"].map(sent_map).fillna(0)
 
@@ -178,12 +179,13 @@ def _push_report(report: dict):
         print("推送模块不可用，跳过")
         return
 
-    decision = report["decision"]
+    decision = report["decision"] or ""
     steps = report["steps"]
 
-    if "NEW_MODEL_DEPLOYED" in decision:
+    # 按 decision 首字符判断（与 evolve() 主函数输出对齐）
+    if decision.startswith("✓"):
         emoji = "✓ 新模型已上线"
-    elif "OLD_MODEL_RETAINED" in decision:
+    elif decision.startswith("⚠"):
         emoji = "→ 保留旧模型"
     else:
         emoji = f"✗ {decision}"

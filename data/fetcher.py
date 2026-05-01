@@ -6,7 +6,6 @@
 2. 东方财富直连 API (HTTP JSON)
 3. AKShare (pip 包)
 4. 腾讯财经 (HTTP)
-5. BaoStock (TCP)
 
 所有获取的数据自动写入本地缓存，回测/信号优先读缓存。
 """
