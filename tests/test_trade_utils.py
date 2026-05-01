@@ -45,24 +45,39 @@ class TestIsTradeable:
     def test_sme_003(self):
         assert is_tradeable("003816") is True
 
-    # 科创板 应拒绝
+    # 科创板 应允许（50 万本金已达开户门槛）
     def test_star_688(self):
-        assert is_tradeable("688001") is False
+        assert is_tradeable("688001") is True
 
     def test_star_688_upper(self):
-        assert is_tradeable("688599") is False
+        assert is_tradeable("688599") is True
 
-    # 北交所 应拒绝
+    # 北交所 应允许（50 万本金已达开户门槛）
     def test_bse_83(self):
-        assert is_tradeable("830799") is False
+        assert is_tradeable("830799") is True
 
     def test_bse_43(self):
-        assert is_tradeable("430047") is False
+        assert is_tradeable("430047") is True
 
     def test_bse_87(self):
-        assert is_tradeable("870001") is False
+        assert is_tradeable("870001") is True
 
-    # B股 应拒绝
+    # 北交所 2024 改版新代码段 (920) 应允许
+    def test_bse_920(self):
+        assert is_tradeable("920001") is True
+
+    # 创业板新代码段 (301/302) 应允许
+    def test_gem_301(self):
+        assert is_tradeable("301001") is True
+
+    def test_gem_302(self):
+        assert is_tradeable("302001") is True
+
+    # 科创板新代码段 (689) 应允许
+    def test_star_689(self):
+        assert is_tradeable("689001") is True
+
+    # B股 应拒绝（需外汇账户）
     def test_b_sh_900(self):
         assert is_tradeable("900901") is False
 

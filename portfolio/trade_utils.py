@@ -7,9 +7,14 @@ A股交易规则:
   - 印花税: 卖出 0.1%
   - 过户费: 0.001%
 
-板块限制:
-  - 可买: 主板(000/001/002/003/600/601/603/605) + 创业板(300)
-  - 不可买: 科创板(688) + 北交所(8xx/4xx) + B股(900/200)
+板块限制（黑名单策略）:
+  - 不可买: B 股 (沪 B 900xxx / 深 B 200xxx，需外汇账户)
+  - 其他全部 A 股代码段允许：
+    - 主板/中小板 000/001/002/003
+    - 创业板 300/301/302（含新代码段）
+    - 沪市主板 600/601/603/605
+    - 科创板 688/689（含新代码段）
+    - 北交所 4xx/8xx/920（含 2024 改版新代码段）
 """
 
 import re
@@ -24,13 +29,23 @@ def humanize_reason(reason: str, name: str = "", reason_data: dict = None) -> st
     from portfolio.reason_text import humanize_reason as _humanize
     return _humanize(reason_data or {}, name=name, fallback_reason=reason)
 
-# 可交易代码前缀（正则）
-_TRADEABLE_RE = re.compile(r"^(000|001|002|003|300|600|601|603|605)\d{3}$")
+
+# B 股代码前缀（黑名单，唯一硬过滤）
+# 沪 B: 900xxx, 深 B: 200xxx
+_B_SHARE_PREFIXES = ("900", "200")
 
 
 def is_tradeable(code: str) -> bool:
-    """检查股票代码是否可交易（排除科创板、北交所、B股）"""
-    return bool(_TRADEABLE_RE.match(code))
+    """A 股代码是否可下单交易：白名单格式校验 + B 股黑名单
+
+    黑名单策略：A 股代码段持续新增（如 2024 年北交所启用 920，创业板启用 301），
+    与其穷举不如只过滤一定不能买的 B 股。
+    """
+    if len(code) != 6 or not code.isdigit():
+        return False
+    if code.startswith(_B_SHARE_PREFIXES):
+        return False
+    return True
 
 
 def calc_shares(capital: float, price: float) -> dict:

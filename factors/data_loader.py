@@ -24,14 +24,14 @@ def _safe_table_name(code: str) -> str:
 
 # ============ 股票池筛选 ============
 
-def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataFrame:
+def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 1e13) -> pd.DataFrame:
     """
-    获取小市值股票池（汇总表 → 本地SQLite → 腾讯API → AKShare 多级降级）
+    获取股票池（汇总表 → 本地SQLite → 腾讯API → AKShare 多级降级）
 
     Parameters
     ----------
-    min_cap : float  最小市值（元），默认 5 亿
-    max_cap : float  最大市值（元），默认 50 亿
+    min_cap : float  最小市值（元），默认 5 亿（排除流动性枯竭的超小盘）
+    max_cap : float  最大市值（元），默认 1e13（实质无上限）
 
     Returns
     -------

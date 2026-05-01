@@ -131,7 +131,7 @@ def get_stock_picks(stock_capital: float, top_n: int = 5) -> list:
 
     # Step 1: 多因子打分
     print("  计算多因子得分...")
-    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=1e10)
+    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=1e13)
     if factor_df.empty:
         return []
 
@@ -353,7 +353,7 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
 
     # Step 1: 计算因子（不含情绪，~40秒）
     print("  计算技术+基本面因子...")
-    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=1e10, skip_sentiment=True)
+    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=1e13, skip_sentiment=True)
     if factor_df.empty:
         return []
 

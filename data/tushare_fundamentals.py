@@ -81,8 +81,7 @@ def fetch_by_date(pro, trade_dates, limit=0):
                 fields=",".join(FUND_FIELDS),
             )
             if df is not None and len(df) > 0:
-                # 过滤只保留沪深A股 (sz/sh, 排除北交所BJ)
-                df = df[~df["ts_code"].str.endswith(".BJ")]
+                # 全市场覆盖：含沪/深/科创板/北交所，B 股在下游 is_tradeable 过滤
                 df.to_parquet(parquet_path, index=False)
                 success += 1
             else:

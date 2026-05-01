@@ -272,12 +272,12 @@ def _batch_sentiment_factors(factor_df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_stock_pool_factors(
     min_cap: float = 5e8,
-    max_cap: float = 5e9,
+    max_cap: float = 1e13,
     end_date: str = None,
     skip_sentiment: bool = False,
 ) -> pd.DataFrame:
     """
-    计算整个小市值股票池的因子矩阵
+    计算股票池的因子矩阵（默认覆盖 5 亿以上全市场）
 
     Returns
     -------
