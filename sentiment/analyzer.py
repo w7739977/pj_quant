@@ -196,30 +196,40 @@ def rule_based_sentiment(text: str) -> float:
 
 def flash_tag_sentiment(texts: list[str]) -> list[float]:
     """
-    第一阶段: glm-4-flash 快速批量打情绪标签
+    批量给文本打情绪分
 
-    优势: 速度快、成本低、直接输出结构化分数
+    优先级: FinBERT 本地（零限流）→ GLM-4-flash → 关键词规则
     """
     if not texts:
         return []
 
-    news_block = "\n".join(f"{i+1}. {t[:100]}" for i, t in enumerate(texts))
+    # 优先 FinBERT 本地推理
+    try:
+        from sentiment.finbert_local import score_texts, is_available
+        if is_available():
+            scores = score_texts(texts)
+            if scores and any(s != 0 for s in scores):
+                logger.debug(f"FinBERT 打分 {len(texts)} 条")
+                return scores
+    except Exception as e:
+        logger.warning(f"FinBERT 调用失败，降级 GLM: {e}")
 
+    # 降级 1: GLM-4-flash
+    news_block = "\n".join(f"{i+1}. {t[:100]}" for i, t in enumerate(texts))
     prompt = f"""给以下{len(texts)}条A股相关新闻打情绪分，范围[-1,1]，-1最利空，1最利好。考虑对A股市场的实际影响程度。
 
 新闻列表:
 {news_block}
 
 只回复一个JSON数组，如 [0.5, -0.3, ...]，不要其他内容。"""
-
     content = _call_llm("glm-4-flash", prompt, max_tokens=300, temperature=0.3)
     scores = _parse_scores(content, len(texts))
 
     if scores is not None:
         return scores
 
-    # flash 失败，降级到规则
-    logger.info("flash 打标失败，降级到规则模式")
+    # 降级 2: 关键词规则
+    logger.info("LLM 全部失败，降级到规则模式")
     return [rule_based_sentiment(t) for t in texts]
 
 

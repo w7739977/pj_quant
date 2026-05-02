@@ -196,25 +196,23 @@ def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) 
 
 def _batch_sentiment_factors(factor_df: pd.DataFrame) -> pd.DataFrame:
     """
-    批量计算情绪因子
-
-    策略: 对每只股票抓取新闻标题，然后按批次（每批20只）调用 flash 打标。
-    无新闻的股票默认 0 分。
+    批量计算情绪因子（FinBERT 优先）
     """
-    from sentiment.analyzer import fetch_stock_news, _call_llm, _parse_scores
+    from sentiment.analyzer import fetch_stock_news, flash_tag_sentiment
 
     df = factor_df.copy()
     df["sentiment_score"] = 0.0
     df["sentiment_count"] = 0
 
     symbols = df["code"].tolist()
-    # 收集所有新闻标题
-    stock_titles = {}  # symbol -> [titles]
+
+    # 阶段 1: 抓新闻（仍是串行，下次优化）
+    stock_titles = {}
     for sym in symbols:
         try:
             news = fetch_stock_news(sym)
             if news:
-                stock_titles[sym] = [n["title"] for n in news]
+                stock_titles[sym] = [n["title"] for n in news[:3]]
         except Exception:
             pass
 
@@ -222,51 +220,30 @@ def _batch_sentiment_factors(factor_df: pd.DataFrame) -> pd.DataFrame:
         logger.info("无可用的个股新闻，情绪因子全部为 0")
         return df
 
-    # 按批次调用 flash 打标（每批最多 20 只股票的新闻标题）
-    batch_size = 20
-    all_syms = list(stock_titles.keys())
-    for start in range(0, len(all_syms), batch_size):
-        batch = all_syms[start:start + batch_size]
-        lines = []
-        sym_order = []
-        for sym in batch:
-            for title in stock_titles[sym][:3]:  # 每只最多取3条
-                lines.append(f"[{sym}] {title[:60]}")
-                sym_order.append(sym)
+    # 阶段 2: 拼成大批量喂 FinBERT 一次推理
+    all_titles = []
+    sym_offsets = {}  # sym → (start, end) 位置
+    cursor = 0
+    for sym, titles in stock_titles.items():
+        sym_offsets[sym] = (cursor, cursor + len(titles))
+        all_titles.extend(titles)
+        cursor += len(titles)
 
-        if not lines:
-            continue
+    # 一次批量打分（FinBERT 自动 batch_size=32）
+    scores = flash_tag_sentiment(all_titles)
 
-        prompt = f"""给以下{len(lines)}条A股个股新闻打情绪分，范围[-1,1]，-1最利空，1最利好。
-每行开头[代码]表示对应的股票。
-
-新闻列表:
-{chr(10).join(f'{i+1}. {l}' for i, l in enumerate(lines))}
-
-只回复JSON数组，如 [0.5, -0.3, ...]，不要其他内容。"""
-
-        content = _call_llm("glm-4-flash", prompt, max_tokens=500, temperature=0.3)
-        scores = _parse_scores(content, len(lines))
-
-        if scores is None:
-            continue
-
-        # 按股票聚合分数
-        from collections import defaultdict
-        sym_scores = defaultdict(list)
-        for sym, sc in zip(sym_order, scores):
-            sym_scores[sym].append(sc)
-
-        for sym, sc_list in sym_scores.items():
+    # 按股票聚合
+    for sym, (start, end) in sym_offsets.items():
+        sym_scores = scores[start:end]
+        if sym_scores:
+            avg = float(np.mean(sym_scores))
             idx = df.index[df["code"] == sym]
             if len(idx) > 0:
-                df.loc[idx[0], "sentiment_score"] = round(float(np.mean(sc_list)), 3)
-                df.loc[idx[0], "sentiment_count"] = len(sc_list)
-
-        logger.info(f"情绪因子批次: {start+1}~{min(start+batch_size, len(all_syms))}/{len(all_syms)} 完成")
+                df.loc[idx[0], "sentiment_score"] = round(avg, 3)
+                df.loc[idx[0], "sentiment_count"] = len(sym_scores)
 
     has_sentiment = (df["sentiment_count"] > 0).sum()
-    logger.info(f"情绪因子完成: {has_sentiment}/{len(df)} 只有新闻数据")
+    logger.info(f"情绪因子完成: {has_sentiment}/{len(df)} 只 (FinBERT)")
     return df
 
 
