@@ -142,8 +142,26 @@ def prepare_training_data(
     if train_df.empty:
         return train_df
 
+    # === 极值缩尾（防御性，必跑） ===
+    # 实证发现 Tushare 财务数据存在异常值（重组/ST/并表口径变化导致）：
+    #   roe_yearly  range [-17209, 2685]  异常 0.58%
+    #   or_yoy      range [-155, 151223]  异常 0.03%
+    #   debt_to_assets  range [1, 19174]   异常 0.48%
+    # 不裁会让 XGBoost 学到极端噪声 → 单只异常股拉偏整个模型
+    # 对 4 个财务因子 + 估值因子做 1%/99% 缩尾，保留正常分布
+    from factors.calculator import winsorize_cross_section
+    winsorize_cols = [
+        "roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets",  # P0 财务
+        "pe_ttm", "pb",  # 估值因子也可能有极端值（重组前后）
+    ]
+    winsorize_cols = [c for c in winsorize_cols if c in train_df.columns]
+    if winsorize_cols:
+        train_df = winsorize_cross_section(train_df, winsorize_cols,
+                                            lower=0.01, upper=0.99)
+        logger.info(f"  极值缩尾完成 (1%/99%): {winsorize_cols}")
+
     # === 因子预处理（可选，环境变量 ENABLE_NEUTRALIZE=1 启用）===
-    # 实测中性化在小盘策略下反而降低 R²（信号失真），暂时禁用
+    # 实测中性化在小盘策略下反而降低 R²（信号失真），默认禁用
     # 待因子库扩展到 50+ 后再评估开启
     import os
     if os.getenv("ENABLE_NEUTRALIZE") == "1":
@@ -164,7 +182,8 @@ def prepare_training_data(
         logger.info(f"  因子中性化已禁用 (set ENABLE_NEUTRALIZE=1 启用)")
 
     # 打印基本面因子使用率
-    fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]
+    fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio",
+                 "roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets"]
     for col in fund_cols:
         if col in train_df.columns:
             non_null = train_df[col].notna().sum()
@@ -392,15 +411,31 @@ def predict(factor_df: pd.DataFrame) -> pd.DataFrame:
     model = XGBRegressor()
     model.load_model(model_path)
 
-    # === 因子预处理: neutralize ===
-    from factors.calculator import neutralize_factors
-    if "industry" not in factor_df.columns:
-        from data.tushare_industry import get_industry_for_codes
-        ind_map = get_industry_for_codes(factor_df["code"].tolist())
-        factor_df = factor_df.copy()
-        factor_df["industry"] = factor_df["code"].map(ind_map).fillna("未知")
+    # === 因子预处理（与训练流程对齐） ===
+    factor_df = factor_df.copy()
 
-    factor_df = neutralize_factors(factor_df, FEATURE_COLS)
+    # 1. 极值缩尾（与训练一致，必跑）
+    from factors.calculator import winsorize_cross_section
+    winsorize_cols = [
+        "roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets",
+        "pe_ttm", "pb",
+    ]
+    winsorize_cols = [c for c in winsorize_cols if c in factor_df.columns]
+    if winsorize_cols:
+        factor_df = winsorize_cross_section(factor_df, winsorize_cols,
+                                             lower=0.01, upper=0.99)
+
+    # 2. 中性化（仅在 ENABLE_NEUTRALIZE=1 时启用，与训练一致）
+    import os
+    if os.getenv("ENABLE_NEUTRALIZE") == "1":
+        from factors.calculator import neutralize_factors_per_section
+        if "industry" not in factor_df.columns:
+            from data.tushare_industry import get_industry_for_codes
+            ind_map = get_industry_for_codes(factor_df["code"].tolist())
+            factor_df["industry"] = factor_df["code"].map(ind_map).fillna("未知")
+        # predict 是单一截面，section 列可省略，全列做 zscore
+        from factors.calculator import cross_sectional_zscore
+        factor_df = cross_sectional_zscore(factor_df, FEATURE_COLS)
 
     X = factor_df[FEATURE_COLS].copy()
     X = X.fillna(X.median())
