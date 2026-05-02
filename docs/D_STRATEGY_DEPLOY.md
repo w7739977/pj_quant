@@ -57,10 +57,13 @@ python3 scripts/validate_financial.py      # 必须 ✅ 全部检查通过
 # 5. 训练 ML 模型
 python3 main.py evolve                     # ~5 分钟，生成 xgb_ranker.json
 
-# 6. 端到端冒烟（不推送）
+# 6. 回填共识缓存（首次部署必跑，避免等 5 个工作日）
+python3 scripts/backfill_consensus_cache.py --days 10
+
+# 7. 端到端冒烟（不推送）
 python3 main.py live --monitor-only        # 跑完整流程但不推送
 
-# 7. 配置 crontab 自动化
+# 8. 配置 crontab 自动化
 crontab -e   # 见下方
 ```
 
@@ -128,7 +131,15 @@ print(cache_stats())
 "
 ```
 
-期望：跑过几个工作日后，`distinct_dates >= 5`、`max_date` 接近今天。
+期望：`distinct_dates >= 5`、`max_date` 接近今天。
+
+**❗ 首次部署/迁移机器：用 backfill 脚本一次性补足缓存**（避免等 5 个工作日累积）：
+
+```bash
+python3 scripts/backfill_consensus_cache.py --days 10
+```
+
+这会用当前生产模型对过去 10 个交易日重算 final_score 入 cache。完成后下次 `live --consensus` 直接可用。
 
 ### 5.3 端到端
 ```bash
