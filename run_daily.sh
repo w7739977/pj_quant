@@ -1,20 +1,21 @@
 #!/bin/bash
 # =============================================================
-# A股量化系统 - 每日自动执行脚本（D 方案：周一共识选股 + 周二~五持仓监控）
+# A股量化系统 - 每日 15:15 收盘后维护脚本（Mon-Fri）
 #
-# 流程:
-#   - 增量数据拉取 (每天)
-#   - preflight 健康检查 (每天)
-#   - 选股推送 (周一: live --consensus, 周二~五: live --monitor-only)
-#   - postflight 归档 (每天)
+# 流程（Mon-Fri 全部一致）:
+#   - 增量数据拉取
+#   - preflight 健康检查
+#   - live --monitor-only 推送（持仓止损/止盈监控 + 缓存今日 scored）
+#   - postflight 归档
 #
-# 决策逻辑（基于 4 个月回测，13 周观测）:
-#   - 周一共识选股 D 方案 +1.15% 周均 alpha (vs 日频 +0.41%)
-#   - 周二~五 monitor-only 仍跑止损/止盈/超时调仓，但不重选新股
-#   - 这样换手降到 1/5，省 0.5%-1%/周 摩擦成本
+# 配套：run_weekly.sh (周一 08:30 盘前) — 跑共识选股推送 picks
+#
+# 为什么 D 方案不在周一 15:15 跑？
+#   A 股 15:00 已收盘。周一 15:15 推 picks 用户最早周二开盘买，
+#   timing 与回测「周一开盘买持 5 天」不符，会丢失部分 alpha。
 #
 # crontab 配置:
-#   30 15 * * 1-5 /path/to/pj_quant/run_daily.sh >> /path/to/pj_quant/logs/cron.log 2>&1
+#   15 15 * * 1-5 /path/to/pj_quant/run_daily.sh >> /path/to/pj_quant/logs/cron.log 2>&1
 # =============================================================
 
 set -e
@@ -58,25 +59,17 @@ send_message('⚠️  preflight 失败', '$(date) 日常执行前检查未通过
     exit 1
 fi
 
-# 阶段二：选股 / 持仓监控（按周几切换模式）
-# - 周一: --consensus 触发 5 天频次共识选股
-# - 周二~五: --monitor-only 跑止损/止盈 + 缓存今日 scored 供下周共识
-if [ "$WEEKDAY" = "1" ]; then
-    LIVE_ARGS="live --consensus --push"
-    echo "[$(date +%H:%M:%S)] 周一: 共识选股 (D 方案，5 天频次共识)..." | tee -a "$LOG_FILE"
-else
-    LIVE_ARGS="live --monitor-only --push"
-    echo "[$(date +%H:%M:%S)] 周${WEEKDAY}: 仅持仓监控（同时缓存今日 scored 供下周一共识）..." | tee -a "$LOG_FILE"
-fi
-
-if python3 main.py $LIVE_ARGS 2>&1 | tee -a "$LOG_FILE"; then
+# 阶段二：持仓监控 + 缓存今日 scored（每天一致）
+# 共识选股不在此处跑（见 run_weekly.sh，每周一 08:30 盘前推送）
+echo "[$(date +%H:%M:%S)] 持仓监控 + 缓存今日 scored..." | tee -a "$LOG_FILE"
+if python3 main.py live --monitor-only --push 2>&1 | tee -a "$LOG_FILE"; then
     echo "[$(date +%H:%M:%S)] 推送完成" | tee -a "$LOG_FILE"
 else
-    echo "[$(date +%H:%M:%S)] live 执行失败" | tee -a "$LOG_FILE"
+    echo "[$(date +%H:%M:%S)] live --monitor-only 失败" | tee -a "$LOG_FILE"
     python3 -c "
 from alert.notify import send_message
 from config.settings import PUSHPLUS_TOKEN
-send_message('⚠️  live 执行失败', '$(date) 操作建议生成失败，请排查。详见 $LOG_FILE', PUSHPLUS_TOKEN)
+send_message('⚠️  monitor-only 失败', '$(date) 详见 $LOG_FILE', PUSHPLUS_TOKEN)
 " 2>&1 | tee -a "$LOG_FILE" || true
     exit 1
 fi

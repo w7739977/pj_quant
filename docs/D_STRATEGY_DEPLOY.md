@@ -95,20 +95,35 @@ crontab -e   # 见下方
 ## 三、定时任务（生产 crontab）
 
 ```cron
-# 每日 15:30 — 周一选共识、周二~五 monitor-only
-30 15 * * 1-5 /opt/pj_quant/run_daily.sh >> /opt/pj_quant/logs/cron.log 2>&1
+# 周一 08:30 盘前 — D 方案共识选股推送（picks 给用户开盘前看）
+30 8 * * 1   /opt/pj_quant/run_weekly.sh >> /opt/pj_quant/logs/cron.log 2>&1
+
+# Mon-Fri 15:15 — 收盘后维护（持仓监控 + 缓存今日 scored）
+15 15 * * 1-5 /opt/pj_quant/run_daily.sh >> /opt/pj_quant/logs/cron.log 2>&1
 
 # 每月 1 号 16:00 — 自动 evolve 训练
-0 16 1 * * cd /opt/pj_quant && python3 main.py evolve --push >> logs/evolve.log 2>&1
+0 16 1 * *  cd /opt/pj_quant && python3 main.py evolve --push >> logs/evolve.log 2>&1
 ```
 
-`run_daily.sh` 内部按周几自动切换：
+### 数据流时间线
 
-| 周几 | 命令 | 行为 |
+| 时间 | 脚本 | 行为 |
 |---|---|---|
-| 周一 | `live --consensus --push` | 5 天频次共识选股 + 推送清单 |
-| 周二~五 | `live --monitor-only --push` | 止损/止盈监控 + 缓存今日 scored 供下周共识 |
-| 周六/日 | crontab `1-5` 自动跳过 | — |
+| 周五 15:15 | `run_daily.sh` | cache 周五 scored |
+| **周一 08:30** | `run_weekly.sh` | 读 cache（上周 Mon-Fri 5 天）→ 共识 → push picks |
+| 周一 09:30 | (用户操作) | 用户按 picks 在开盘买入 |
+| 周一 15:15 | `run_daily.sh` | cache 周一 scored（下下周一用）+ 监控持仓 |
+| 周二~五 15:15 | `run_daily.sh` | 同上 |
+
+### 为什么 picks 推送是周一早盘前 08:30？
+
+A 股 15:00 已收盘。如果在周一 15:15 推 picks，用户最早周二开盘才能买，
+持有 5 天到下周二，与回测的「周一开盘买入持 5 天」timing 不符。
+
+周一 08:30 推送：
+- cache 已有上周 Mon-Fri 5 天数据（最后一次写入是周五 15:15）
+- consensus 读这 5 天 → 推 picks → 用户 09:30 开盘后买入
+- 与回测完美对齐
 
 ---
 
