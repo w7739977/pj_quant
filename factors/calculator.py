@@ -366,19 +366,23 @@ def cross_sectional_zscore(df: pd.DataFrame, cols: list) -> pd.DataFrame:
 def industry_neutralize(df: pd.DataFrame, cols: list,
                         industry_col: str = "industry") -> pd.DataFrame:
     """
-    行业中性化（信达金工/中金标配）— 按行业分组排名归一化到 0~1
+    [实测在 A 股小盘策略下失效] 行业中性化 — 按行业分组排名归一化到 0~1
 
-    保留行业内相对优势，去除行业 beta
+    业界做法（信达金工/中金）：消除行业 beta，保留行业内相对优势。
+    pj_quant 实测（2026-05-02 v5）：滚动截面密度太低（每行业 1-3 只样本），
+    rank(pct) 退化为 0.5/1.0 等粗粒度值，反而降低 R²。
+
+    详见 docs/optimization_backlog.md "已废弃方案 #2"。
+
+    保留作为单元工具，但不应进入训练流程。新代码请使用 neutralize_factors_per_section。
     """
     if industry_col not in df.columns:
-        # 无行业字段，跳过中性化
         return df
     df = df.copy()
     for col in cols:
         if col not in df.columns:
             continue
         s = pd.to_numeric(df[col], errors="coerce")
-        # 按行业分组排名（pct=True 得到 0-1 分位数）
         df[col] = s.groupby(df[industry_col]).rank(pct=True, na_option="keep")
     return df
 
@@ -386,9 +390,13 @@ def industry_neutralize(df: pd.DataFrame, cols: list,
 def neutralize_factors(df: pd.DataFrame, factor_cols: list,
                        industry_col: str = "industry") -> pd.DataFrame:
     """
-    一站式因子预处理: winsorize → zscore → industry_neutralize
+    [DEPRECATED] 一站式因子预处理（全局 winsorize → zscore → industry_neutralize）
 
-    用于训练数据生成 + 实时预测前
+    实测全局一锅煮做 zscore 违反"截面标准化"语义（v3 R²=0.0316）。
+    应使用 neutralize_factors_per_section（按截面分组），但当前在 pj_quant 滚动
+    截面方法下整体效果不佳，已默认禁用。
+
+    详见 docs/optimization_backlog.md "已废弃方案 #2"。
     """
     df = winsorize_cross_section(df, factor_cols)
     df = cross_sectional_zscore(df, factor_cols)
