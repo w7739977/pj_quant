@@ -106,8 +106,8 @@ def prepare_training_data(
                 factors["turnover_rate"] = last_row.get("turnover_rate", np.nan)
                 factors["volume_ratio"] = last_row.get("volume_ratio", np.nan)
 
-                # 情绪因子暂用 NaN（需实时调用）
-                factors["sentiment_score"] = np.nan
+                # 情绪因子: 从 sentiment_history 查询历史值，无则 NaN
+                factors["sentiment_score"] = _lookup_historical_sentiment(sym, end_date)
 
                 records.append(factors)
         except Exception:
@@ -146,6 +146,18 @@ def prepare_training_data(
         logger.info(f"    {col}: {non_null}/{len(train_df)} ({non_null*100/len(train_df):.1f}%) 有数据")
 
     return train_df
+
+
+def _lookup_historical_sentiment(code: str, date: str) -> float:
+    """优先内存缓存查询；未命中返回 NaN"""
+    global _SENT_CACHE
+    if "_SENT_CACHE" not in globals():
+        # 一次性加载全部历史情绪到内存（~100MB 内）
+        from data.sentiment_history import load_all_to_dict
+        logger.info("加载 sentiment_history 到内存缓存...")
+        _SENT_CACHE = load_all_to_dict()
+        logger.info(f"情绪缓存: {len(_SENT_CACHE)} 条记录")
+    return _SENT_CACHE.get((date, code), float("nan"))
 
 
 def train_model(train_df: pd.DataFrame) -> dict:
