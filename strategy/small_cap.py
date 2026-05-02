@@ -5,7 +5,7 @@
 1. 从全A股筛选市值 5~50 亿的小盘股
 2. 用多因子打分（动量、波动率、换手率、技术指标、基本面）
 3. 买入综合得分最高的 N 只股票
-4. 月度调仓，个股止损止盈由 settings 控制
+4. 月度调仓，个股止损 -10%
 """
 
 import pandas as pd
@@ -46,20 +46,40 @@ class SmallCapStrategy(BaseStrategy):
         df = factor_df.copy()
 
         # 定义因子方向: 正=越大越好, 负=越小越好
+        # 与 ml/ranker.py FEATURE_COLS 对齐（24 因子）
         factor_direction = {
-            "mom_20d": 1,      # 动量：涨得多好
-            "mom_5d": 1,       # 短期动量
-            "vol_20d": -1,     # 波动率：低波动好
-            "avg_turnover_5d": 1,  # 换手率：适度活跃好
-            "turnover_accel": 1,   # 换手率加速：资金关注度
-            "volume_surge": 1,     # 放量：资金介入
-            "ma5_bias": -1,        # MA偏离：低偏离好（超跌反弹）
+            # 动量
+            "mom_5d": 1,
+            "mom_10d": 1,
+            "mom_20d": 1,
+            "mom_60d": 1,
+            # 波动率：低波动好
+            "vol_10d": -1,
+            "vol_20d": -1,
+            # 换手率：适度活跃好
+            "avg_turnover_5d": 1,
+            "avg_turnover_20d": 1,
+            "turnover_accel": 1,
+            "turnover_rate": 1,
+            # 量价
+            "vol_price_diverge": 1,
+            "volume_surge": 1,
+            "volume_ratio": 1,
+            # MA 偏离：低偏离好（超跌反弹）
+            "ma5_bias": -1,
             "ma10_bias": -1,
+            "ma20_bias": -1,
+            # 技术
             "rsi_14": -1,         # RSI：超卖好
-            "pe_ttm": -1,         # PE：低估值好
-            "pb": -1,             # PB：低估值好
-            "volume_ratio": 1,    # 量比：活跃好
-            "sentiment_score": 1,  # 情绪：正面新闻多好
+            # 估值
+            "pe_ttm": -1,
+            "pb": -1,
+            # 情绪因子 sentiment_score 暂禁用（sentiment_history 表未回填）
+            # P0 财务因子
+            "roe_yearly": 1,        # ROE 越高越好
+            "or_yoy": 1,            # 营收增速越高越好
+            "dt_eps_yoy": 1,        # EPS 增速越高越好
+            "debt_to_assets": -1,   # 负债率越低越好
         }
 
         scores = pd.Series(0.0, index=df.index)
@@ -79,12 +99,11 @@ class SmallCapStrategy(BaseStrategy):
             if direction == -1:
                 rank = 1 - rank
 
-            # 权重: 动量和估值最重要
-            weight = 1.0
-            if "mom" in factor_name:
-                weight = 2.0  # 动量因子权重加倍
-            elif "pe" in factor_name or "pb" in factor_name:
-                weight = 1.5  # 估值因子权重
+            # 权重: 财务核心因子稍加权，其余等权
+            if factor_name in ("roe_yearly", "or_yoy", "dt_eps_yoy"):
+                weight = 1.5
+            else:
+                weight = 1.0
 
             scores += rank.fillna(0.5) * weight
 

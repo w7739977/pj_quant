@@ -53,7 +53,7 @@ def calc_trade_cost(price: float, shares: int, is_buy: bool) -> dict:
 
 
 def run_backtest(
-    price_data,
+    price_data: dict[str, pd.DataFrame],
     signals: pd.DataFrame,
     initial_capital: float = INITIAL_CAPITAL,
     verbose: bool = True,
@@ -77,83 +77,68 @@ def run_backtest(
     trades = []
     nav_records = []
 
-    # M1: 收集所有交易日，按日记录 NAV（而非按 signal）
-    all_dates = sorted(set(d for df in price_data.values() for d in df["date"].tolist()))
     signals = signals.sort_values("date").reset_index(drop=True)
-    sig_iter = iter(signals.to_dict("records"))
-    pending = next(sig_iter, None)
 
-    for d in all_dates:
-        # 处理当天所有信号
-        while pending and pd.Timestamp(pending["date"]) <= d:
-            symbol = pending.get("symbol", "")
-            action = pending.get("action", "hold")
+    for _, signal in signals.iterrows():
+        date = signal["date"]
+        symbol = signal.get("symbol", "")
+        action = signal.get("action", "hold")
 
-            # 获取当日价格
+        # 获取当日价格
+        if symbol and symbol in price_data:
+            df = price_data[symbol]
+            day_price = df[df["date"] <= date]
+            if len(day_price) == 0:
+                continue
+            price = day_price.iloc[-1]["close"]
+        else:
             price = 0
-            if symbol and symbol in price_data:
-                df = price_data[symbol]
-                day_price = df[df["date"] <= d]
-                if len(day_price) > 0:
-                    price = day_price.iloc[-1]["close"]
 
-            # 执行交易
-            if action == "sell" and symbol in holdings:
-                shares = holdings[symbol]["shares"]
-                if shares > 0 and price > 0:
-                    costs = calc_trade_cost(price, shares, is_buy=False)
-                    cash += price * shares - costs["total_cost"]
+        # 执行交易
+        if action == "sell" and symbol in holdings:
+            shares = holdings[symbol]["shares"]
+            if shares > 0:
+                costs = calc_trade_cost(price, shares, is_buy=False)
+                cash += price * shares - costs["total_cost"]
+                trades.append(Trade(
+                    date=str(date)[:10], symbol=symbol, action="sell",
+                    price=price, shares=shares,
+                    commission=costs["commission"],
+                    stamp_tax=costs["stamp_tax"],
+                    transfer_fee=costs["transfer_fee"],
+                    cash_after=round(cash, 2),
+                ))
+                del holdings[symbol]
+
+        elif action == "buy" and symbol and symbol not in holdings:
+            # 用所有可用资金买入（留 100 元余量）
+            buy_amount = cash - 100
+            if buy_amount > price * 100:  # 至少买 100 股
+                shares = int(buy_amount / price / 100) * 100  # 取整到 100 股
+                costs = calc_trade_cost(price, shares, is_buy=True)
+                total_needed = price * shares + costs["total_cost"]
+                if total_needed <= cash:
+                    cash -= total_needed
+                    holdings[symbol] = {"shares": shares, "avg_cost": price}
                     trades.append(Trade(
-                        date=str(d)[:10], symbol=symbol, action="sell",
+                        date=str(date)[:10], symbol=symbol, action="buy",
                         price=price, shares=shares,
                         commission=costs["commission"],
                         stamp_tax=costs["stamp_tax"],
                         transfer_fee=costs["transfer_fee"],
                         cash_after=round(cash, 2),
                     ))
-                    del holdings[symbol]
-
-            elif action == "buy" and symbol and price > 0:
-                # M2: 支持加仓（不再限制 symbol not in holdings）
-                buy_amount = cash - 100
-                if buy_amount > price * 100:
-                    shares = int(buy_amount / price / 100) * 100
-                    costs = calc_trade_cost(price, shares, is_buy=True)
-                    total_needed = price * shares + costs["total_cost"]
-                    if total_needed <= cash:
-                        cash -= total_needed
-                        if symbol in holdings:
-                            old = holdings[symbol]
-                            total_shares = old["shares"] + shares
-                            total_cost = old["avg_cost"] * old["shares"] + price * shares
-                            holdings[symbol] = {
-                                "shares": total_shares,
-                                "avg_cost": total_cost / total_shares,
-                            }
-                        else:
-                            holdings[symbol] = {"shares": shares, "avg_cost": price}
-                        trades.append(Trade(
-                            date=str(d)[:10], symbol=symbol, action="buy",
-                            price=price, shares=shares,
-                            commission=costs["commission"],
-                            stamp_tax=costs["stamp_tax"],
-                            transfer_fee=costs["transfer_fee"],
-                            cash_after=round(cash, 2),
-                        ))
-
-            pending = next(sig_iter, None)
 
         # 计算当日总净值
-        holdings_value = 0
-        for s, h in holdings.items():
-            if s in price_data:
-                df = price_data[s]
-                day_price = df[df["date"] <= d]
-                if len(day_price) > 0:
-                    holdings_value += day_price.iloc[-1]["close"] * h["shares"]
+        holdings_value = sum(
+            price_data[s].loc[price_data[s]["date"] <= date].iloc[-1]["close"]
+            * h["shares"]
+            for s, h in holdings.items()
+            if s in price_data
+        )
         nav = cash + holdings_value
         nav_records.append({
-            "date": d,
+            "date": date,
             "nav": round(nav, 2),
             "cash": round(cash, 2),
             "holdings_value": round(holdings_value, 2),
@@ -213,17 +198,18 @@ def _calc_stats(nav_df: pd.DataFrame, initial_capital: float) -> dict:
     drawdown = (nav - peak) / peak
     max_drawdown = drawdown.min()
 
-    # 日收益率 -> Sharpe
-    daily_returns = nav_df["nav"].pct_change().dropna().values
-    from analytics.perf import sharpe_ratio
-    sr = sharpe_ratio(daily_returns)
+    # 日收益率 -> Sharpe（无风险利率按 2%）
+    daily_returns = nav_df["nav"].pct_change().dropna()
+    sharpe_ratio = 0.0
+    if len(daily_returns) > 0 and daily_returns.std() > 0:
+        sharpe_ratio = (daily_returns.mean() - 0.02 / 252) / daily_returns.std() * np.sqrt(252)
 
     return {
         "final_nav": round(final_nav, 2),
         "total_return": total_return,
         "annual_return": annual_return,
         "max_drawdown": round(max_drawdown, 4),
-        "sharpe_ratio": round(sr, 2),
+        "sharpe_ratio": round(sharpe_ratio, 2),
         "trade_count": len(nav_df),
         "total_cost": 0,  # 会在外部补充
         "win_rate": 0,    # 会在外部补充

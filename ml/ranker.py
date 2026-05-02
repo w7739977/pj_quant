@@ -24,8 +24,7 @@ from factors.calculator import compute_stock_pool_factors
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(_PROJECT_ROOT, "ml", "models")
+MODEL_DIR = "ml/models"
 FEATURE_COLS = [
     "mom_5d", "mom_10d", "mom_20d", "mom_60d",
     "vol_10d", "vol_20d",
@@ -33,7 +32,14 @@ FEATURE_COLS = [
     "vol_price_diverge", "volume_surge",
     "ma5_bias", "ma10_bias", "ma20_bias", "rsi_14",
     "pe_ttm", "pb", "turnover_rate", "volume_ratio",
-    "sentiment_score",
+    # 注: sentiment_score 暂时移出特征 — sentiment_history 表尚未回填，
+    # 训练时全 NaN→fillna(median)→常数 0 等同失效。回填后再加回来。
+    # 基础设施保留：calculator._batch_sentiment_factors / sentiment_history.py
+    # P0 财务因子 (PIT)
+    "roe_yearly",
+    "or_yoy",
+    "dt_eps_yoy",
+    "debt_to_assets",
 ]
 
 # 特征重要性保存路径
@@ -76,6 +82,14 @@ def prepare_training_data(
     total = len(symbols)
     records = []
 
+    # 初始化财务 PIT 缓存（全局加载一次）
+    global _FIN_CACHE
+    if "_FIN_CACHE" not in globals():
+        from data.financial_indicator import load_all_pit_to_dict
+        logger.info("加载 financial_indicator 到内存缓存...")
+        _FIN_CACHE = load_all_pit_to_dict()
+        logger.info(f"  财务缓存: {len(_FIN_CACHE)} 只股票 PIT 记录")
+
     for i, sym in enumerate(symbols):
         try:
             df = load_stock_daily(sym)
@@ -90,9 +104,10 @@ def prepare_training_data(
                     continue
 
                 forward_return = float(fwd.iloc[-1]["close"]) / float(fwd.iloc[0]["close"]) - 1.0
+                end_date = str(window.iloc[-1]["date"])[:10]  # 截面日期
 
                 # 计算该截面的技术因子
-                factors = {"code": sym, "label": forward_return}
+                factors = {"code": sym, "label": forward_return, "end_date": end_date}
                 factors.update(calc_momentum(window))
                 factors.update(calc_volatility(window))
                 factors.update(calc_turnover_factor(window))
@@ -106,9 +121,15 @@ def prepare_training_data(
                 factors["turnover_rate"] = last_row.get("turnover_rate", np.nan)
                 factors["volume_ratio"] = last_row.get("volume_ratio", np.nan)
 
-                # 情绪因子暂用 NaN（需实时调用）
-                factors["sentiment_score"] = np.nan
+                # 财务因子: PIT 查询（按公告日，避免未来数据泄露）
+                fin_factors = _lookup_financial_pit(sym, end_date.replace("-", ""))
+                factors["roe_yearly"] = fin_factors.get("roe_yearly", np.nan)
+                factors["or_yoy"] = fin_factors.get("or_yoy", np.nan)
+                factors["dt_eps_yoy"] = fin_factors.get("dt_eps_yoy", np.nan)
+                factors["debt_to_assets"] = fin_factors.get("debt_to_assets", np.nan)
 
+                # sentiment_score 已从 FEATURE_COLS 移除 (sentiment_history 表未回填)
+                # 不再写入该字段；待回填后从 _lookup_historical_sentiment 恢复
                 records.append(factors)
         except Exception:
             continue
@@ -119,13 +140,90 @@ def prepare_training_data(
     train_df = pd.DataFrame(records)
     logger.info(f"  训练样本生成完成: {len(train_df)} 条 ({len(symbols)} 只股票)")
 
+    if train_df.empty:
+        return train_df
+
+    # === 极值缩尾（防御性，必跑） ===
+    # 实证发现 Tushare 财务数据存在异常值（重组/ST/并表口径变化导致）：
+    #   roe_yearly  range [-17209, 2685]  异常 0.58%
+    #   or_yoy      range [-155, 151223]  异常 0.03%
+    #   debt_to_assets  range [1, 19174]   异常 0.48%
+    # 不裁会让 XGBoost 学到极端噪声 → 单只异常股拉偏整个模型
+    # 对 4 个财务因子 + 估值因子做 1%/99% 缩尾，保留正常分布
+    from factors.calculator import winsorize_cross_section
+    winsorize_cols = [
+        "roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets",  # P0 财务
+        "pe_ttm", "pb",  # 估值因子也可能有极端值（重组前后）
+    ]
+    winsorize_cols = [c for c in winsorize_cols if c in train_df.columns]
+    if winsorize_cols:
+        train_df = winsorize_cross_section(train_df, winsorize_cols,
+                                            lower=0.01, upper=0.99)
+        logger.info(f"  极值缩尾完成 (1%/99%): {winsorize_cols}")
+
+    # === 因子预处理（可选，环境变量 ENABLE_NEUTRALIZE=1 启用）===
+    # 实测中性化在小盘策略下反而降低 R²（信号失真），默认禁用
+    # 待因子库扩展到 50+ 后再评估开启
+    # 注意：os 是模块顶层 import 的，不要在函数内 `import os`，
+    #       否则 Python 把 os 当局部变量，导致函数前面的 os.path.join 报
+    #       "referenced before assignment"
+    if os.getenv("ENABLE_NEUTRALIZE") == "1":
+        from factors.calculator import neutralize_factors_per_section
+        from data.tushare_industry import get_industry_for_codes
+
+        industry_map = get_industry_for_codes(train_df["code"].tolist())
+        train_df["industry"] = train_df["code"].map(industry_map).fillna("未知")
+
+        factor_cols = [c for c in train_df.columns
+                       if c not in ("label", "code", "industry", "end_date")]
+
+        train_df = neutralize_factors_per_section(train_df, factor_cols,
+                                                   section_col="end_date",
+                                                   industry_col="industry")
+        logger.info(f"  因子中性化完成 (按 {train_df['end_date'].nunique()} 个截面分组)")
+    else:
+        logger.info(f"  因子中性化已禁用 (set ENABLE_NEUTRALIZE=1 启用)")
+
     # 打印基本面因子使用率
-    fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]
+    fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio",
+                 "roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets"]
     for col in fund_cols:
-        non_null = train_df[col].notna().sum()
-        logger.info(f"    {col}: {non_null}/{len(train_df)} ({non_null*100/len(train_df):.1f}%) 有数据")
+        if col in train_df.columns:
+            non_null = train_df[col].notna().sum()
+            logger.info(f"    {col}: {non_null}/{len(train_df)} ({non_null*100/len(train_df):.1f}%) 有数据")
 
     return train_df
+
+
+def _lookup_historical_sentiment(code: str, date: str) -> float:
+    """[暂未启用] 历史情绪 PIT 查询；sentiment_history 回填后再启用
+
+    回填后恢复用法：在 prepare_training_data 内为每条样本调用此函数，
+    并把 'sentiment_score' 加回 FEATURE_COLS。
+    """
+    global _SENT_CACHE
+    if "_SENT_CACHE" not in globals():
+        from data.sentiment_history import load_all_to_dict
+        logger.info("加载 sentiment_history 到内存缓存...")
+        _SENT_CACHE = load_all_to_dict()
+        logger.info(f"情绪缓存: {len(_SENT_CACHE)} 条记录")
+    return _SENT_CACHE.get((date, code), float("nan"))
+
+
+def _lookup_financial_pit(code: str, as_of_yyyymmdd: str) -> dict:
+    """O(log n) PIT 查询（每股 ~60 条历史，二分查找）"""
+    global _FIN_CACHE
+    if "_FIN_CACHE" not in globals():
+        return {}
+    history = _FIN_CACHE.get(code, [])
+    if not history:
+        return {}
+    import bisect
+    ann_dates = [h[0] for h in history]
+    idx = bisect.bisect_right(ann_dates, as_of_yyyymmdd) - 1
+    if idx < 0:
+        return {}
+    return history[idx][1]
 
 
 def train_model(train_df: pd.DataFrame) -> dict:
@@ -318,6 +416,32 @@ def predict(factor_df: pd.DataFrame) -> pd.DataFrame:
 
     model = XGBRegressor()
     model.load_model(model_path)
+
+    # === 因子预处理（与训练流程对齐） ===
+    factor_df = factor_df.copy()
+
+    # 1. 极值缩尾（与训练一致，必跑）
+    from factors.calculator import winsorize_cross_section
+    winsorize_cols = [
+        "roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets",
+        "pe_ttm", "pb",
+    ]
+    winsorize_cols = [c for c in winsorize_cols if c in factor_df.columns]
+    if winsorize_cols:
+        factor_df = winsorize_cross_section(factor_df, winsorize_cols,
+                                             lower=0.01, upper=0.99)
+
+    # 2. 中性化（仅在 ENABLE_NEUTRALIZE=1 时启用，与训练一致）
+    # os 用模块顶层 import；不要在函数内重复 import（会让 os 变成局部变量）
+    if os.getenv("ENABLE_NEUTRALIZE") == "1":
+        from factors.calculator import neutralize_factors_per_section
+        if "industry" not in factor_df.columns:
+            from data.tushare_industry import get_industry_for_codes
+            ind_map = get_industry_for_codes(factor_df["code"].tolist())
+            factor_df["industry"] = factor_df["code"].map(ind_map).fillna("未知")
+        # predict 是单一截面，section 列可省略，全列做 zscore
+        from factors.calculator import cross_sectional_zscore
+        factor_df = cross_sectional_zscore(factor_df, FEATURE_COLS)
 
     X = factor_df[FEATURE_COLS].copy()
     X = X.fillna(X.median())

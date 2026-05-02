@@ -12,21 +12,15 @@
 - 技术因子: MA、RSI、MACD
 """
 
-import logging
-
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from factors.data_loader import get_small_cap_stocks
 from data.storage import load_stock_daily
 
-logger = logging.getLogger(__name__)
 
-
-def calc_momentum(df: pd.DataFrame, periods: list = None) -> dict:
+def calc_momentum(df: pd.DataFrame, periods: list = [5, 10, 20, 60]) -> dict:
     """动量因子: 过去N日涨幅"""
-    if periods is None:
-        periods = [5, 10, 20, 60]
     result = {}
     close = df["close"].values
     for p in periods:
@@ -37,10 +31,8 @@ def calc_momentum(df: pd.DataFrame, periods: list = None) -> dict:
     return result
 
 
-def calc_volatility(df: pd.DataFrame, periods: list = None) -> dict:
+def calc_volatility(df: pd.DataFrame, periods: list = [10, 20]) -> dict:
     """波动率因子: 过去N日日收益率标准差"""
-    if periods is None:
-        periods = [10, 20]
     result = {}
     returns = df["close"].pct_change().dropna()
     for p in periods:
@@ -51,10 +43,8 @@ def calc_volatility(df: pd.DataFrame, periods: list = None) -> dict:
     return result
 
 
-def calc_turnover_factor(df: pd.DataFrame, periods: list = None) -> dict:
+def calc_turnover_factor(df: pd.DataFrame, periods: list = [5, 20]) -> dict:
     """换手率因子: 平均换手率、换手率变化"""
-    if periods is None:
-        periods = [5, 20]
     result = {}
     turnover = df.get("turnover", pd.Series(dtype=float))
     if len(turnover) == 0:
@@ -79,15 +69,15 @@ def calc_turnover_factor(df: pd.DataFrame, periods: list = None) -> dict:
 def calc_volume_price(df: pd.DataFrame) -> dict:
     """量价因子: 量价背离、放量程度"""
     result = {}
-    if len(df) < 20:
+    if len(df) < 10:
         return {"vol_price_diverge": np.nan, "volume_surge": np.nan}
 
     # 最近5日 vs 之前15日的量价关系
     recent_ret = df["close"].iloc[-5:].pct_change().dropna().mean()
-    prior_ret = df["close"].iloc[-20:-5].pct_change().dropna().mean()
+    prior_ret = df["close"].iloc[-20:-5].pct_change().dropna().mean() if len(df) >= 20 else 0
 
     recent_vol = df["volume"].iloc[-5:].mean()
-    prior_vol = df["volume"].iloc[-20:-5].mean()
+    prior_vol = df["volume"].iloc[-20:-5].mean() if len(df) >= 20 else df["volume"].mean()
 
     # 量价背离: 价格涨但量缩 → 可能见顶
     if recent_vol > 0 and prior_vol > 0:
@@ -201,30 +191,42 @@ def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) 
     for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]:
         factors[col] = last_row.get(col, np.nan)
 
+    # 财务因子 (PIT 查询，按公告日避免未来数据泄露)
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    try:
+        from data.financial_indicator import get_latest_pit
+        fin = get_latest_pit(symbol, end_date)
+        factors["roe_yearly"] = fin.get("roe_yearly", np.nan)
+        factors["or_yoy"] = fin.get("or_yoy", np.nan)
+        factors["dt_eps_yoy"] = fin.get("dt_eps_yoy", np.nan)
+        factors["debt_to_assets"] = fin.get("debt_to_assets", np.nan)
+    except Exception:
+        for col in ["roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets"]:
+            factors[col] = np.nan
+
     return factors
 
 
 def _batch_sentiment_factors(factor_df: pd.DataFrame) -> pd.DataFrame:
     """
-    批量计算情绪因子
-
-    策略: 对每只股票抓取新闻标题，然后按批次（每批20只）调用 flash 打标。
-    无新闻的股票默认 0 分。
+    批量计算情绪因子（FinBERT 优先）
     """
-    from sentiment.analyzer import fetch_stock_news, _call_llm, _parse_scores
+    from sentiment.analyzer import fetch_stock_news, flash_tag_sentiment
 
     df = factor_df.copy()
     df["sentiment_score"] = 0.0
     df["sentiment_count"] = 0
 
     symbols = df["code"].tolist()
-    # 收集所有新闻标题
-    stock_titles = {}  # symbol -> [titles]
+
+    # 阶段 1: 抓新闻（仍是串行，下次优化）
+    stock_titles = {}
     for sym in symbols:
         try:
             news = fetch_stock_news(sym)
             if news:
-                stock_titles[sym] = [n["title"] for n in news]
+                stock_titles[sym] = [n["title"] for n in news[:3]]
         except Exception:
             pass
 
@@ -232,51 +234,30 @@ def _batch_sentiment_factors(factor_df: pd.DataFrame) -> pd.DataFrame:
         logger.info("无可用的个股新闻，情绪因子全部为 0")
         return df
 
-    # 按批次调用 flash 打标（每批最多 20 只股票的新闻标题）
-    batch_size = 20
-    all_syms = list(stock_titles.keys())
-    for start in range(0, len(all_syms), batch_size):
-        batch = all_syms[start:start + batch_size]
-        lines = []
-        sym_order = []
-        for sym in batch:
-            for title in stock_titles[sym][:3]:  # 每只最多取3条
-                lines.append(f"[{sym}] {title[:60]}")
-                sym_order.append(sym)
+    # 阶段 2: 拼成大批量喂 FinBERT 一次推理
+    all_titles = []
+    sym_offsets = {}  # sym → (start, end) 位置
+    cursor = 0
+    for sym, titles in stock_titles.items():
+        sym_offsets[sym] = (cursor, cursor + len(titles))
+        all_titles.extend(titles)
+        cursor += len(titles)
 
-        if not lines:
-            continue
+    # 一次批量打分（FinBERT 自动 batch_size=32）
+    scores = flash_tag_sentiment(all_titles)
 
-        prompt = f"""给以下{len(lines)}条A股个股新闻打情绪分，范围[-1,1]，-1最利空，1最利好。
-每行开头[代码]表示对应的股票。
-
-新闻列表:
-{chr(10).join(f'{i+1}. {l}' for i, l in enumerate(lines))}
-
-只回复JSON数组，如 [0.5, -0.3, ...]，不要其他内容。"""
-
-        content = _call_llm("glm-4-flash", prompt, max_tokens=500, temperature=0.3)
-        scores = _parse_scores(content, len(lines))
-
-        if scores is None:
-            continue
-
-        # 按股票聚合分数
-        from collections import defaultdict
-        sym_scores = defaultdict(list)
-        for sym, sc in zip(sym_order, scores):
-            sym_scores[sym].append(sc)
-
-        for sym, sc_list in sym_scores.items():
+    # 按股票聚合
+    for sym, (start, end) in sym_offsets.items():
+        sym_scores = scores[start:end]
+        if sym_scores:
+            avg = float(np.mean(sym_scores))
             idx = df.index[df["code"] == sym]
             if len(idx) > 0:
-                df.loc[idx[0], "sentiment_score"] = round(float(np.mean(sc_list)), 3)
-                df.loc[idx[0], "sentiment_count"] = len(sc_list)
-
-        logger.info(f"情绪因子批次: {start+1}~{min(start+batch_size, len(all_syms))}/{len(all_syms)} 完成")
+                df.loc[idx[0], "sentiment_score"] = round(avg, 3)
+                df.loc[idx[0], "sentiment_count"] = len(sym_scores)
 
     has_sentiment = (df["sentiment_count"] > 0).sum()
-    logger.info(f"情绪因子完成: {has_sentiment}/{len(df)} 只有新闻数据")
+    logger.info(f"情绪因子完成: {has_sentiment}/{len(df)} 只 (FinBERT)")
     return df
 
 
@@ -287,7 +268,7 @@ def compute_stock_pool_factors(
     skip_sentiment: bool = False,
 ) -> pd.DataFrame:
     """
-    计算整个小市值股票池的因子矩阵
+    计算股票池的因子矩阵（默认覆盖 5 亿以上全市场）
 
     Returns
     -------
@@ -317,6 +298,11 @@ def compute_stock_pool_factors(
     if df.empty:
         return df
 
+    # === 注入行业字段 ===
+    from data.tushare_industry import get_industry_for_codes
+    industry_map = get_industry_for_codes(df["code"].tolist())
+    df["industry"] = df["code"].map(industry_map).fillna("未知")
+
     # 情绪因子: 批量获取个股新闻标题，一次性让 flash 打标
     if skip_sentiment:
         df["sentiment_score"] = np.nan
@@ -326,4 +312,153 @@ def compute_stock_pool_factors(
         df = _batch_sentiment_factors(df)
 
     logger.info(f"因子计算完成: {len(df)} 只股票, {len(df.columns)} 个因子")
+    return df
+
+
+import logging
+logger = logging.getLogger(__name__)
+
+
+# ============ 因子预处理工具 ============
+
+def winsorize_cross_section(df: pd.DataFrame, cols: list,
+                            lower: float = 0.01, upper: float = 0.99) -> pd.DataFrame:
+    """
+    极值处理（Qlib 标准）— 按截面 1%/99% 分位数 winsorize
+
+    防止异常值（停牌/重组复牌）拖偏 ML 训练
+    注意：默认假设 df 已是单一截面（同一 date 的所有股票）
+    """
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        if s.notna().sum() < 10:
+            continue
+        lo, hi = s.quantile([lower, upper])
+        df[col] = s.clip(lower=lo, upper=hi)
+    return df
+
+
+def cross_sectional_zscore(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """
+    截面 Z-score 标准化（Qlib CSZScoreNorm 等价实现）
+
+    每个因子 (x - mean) / std，让所有因子量级一致
+    注意：df 必须是单一截面
+    """
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        if s.notna().sum() < 10:
+            continue
+        m, sd = s.mean(), s.std()
+        if sd > 1e-8:
+            df[col] = (s - m) / sd
+        else:
+            df[col] = 0.0
+    return df
+
+
+def industry_neutralize(df: pd.DataFrame, cols: list,
+                        industry_col: str = "industry") -> pd.DataFrame:
+    """
+    [实测在 A 股小盘策略下失效] 行业中性化 — 按行业分组排名归一化到 0~1
+
+    业界做法（信达金工/中金）：消除行业 beta，保留行业内相对优势。
+    pj_quant 实测（2026-05-02 v5）：滚动截面密度太低（每行业 1-3 只样本），
+    rank(pct) 退化为 0.5/1.0 等粗粒度值，反而降低 R²。
+
+    详见 docs/optimization_backlog.md "已废弃方案 #2"。
+
+    保留作为单元工具，但不应进入训练流程。新代码请使用 neutralize_factors_per_section。
+    """
+    if industry_col not in df.columns:
+        return df
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        df[col] = s.groupby(df[industry_col]).rank(pct=True, na_option="keep")
+    return df
+
+
+def neutralize_factors(df: pd.DataFrame, factor_cols: list,
+                       industry_col: str = "industry") -> pd.DataFrame:
+    """
+    [DEPRECATED] 一站式因子预处理（全局 winsorize → zscore → industry_neutralize）
+
+    实测全局一锅煮做 zscore 违反"截面标准化"语义（v3 R²=0.0316）。
+    应使用 neutralize_factors_per_section（按截面分组），但当前在 pj_quant 滚动
+    截面方法下整体效果不佳，已默认禁用。
+
+    详见 docs/optimization_backlog.md "已废弃方案 #2"。
+    """
+    df = winsorize_cross_section(df, factor_cols)
+    df = cross_sectional_zscore(df, factor_cols)
+    df = industry_neutralize(df, factor_cols, industry_col)
+    return df
+
+
+def neutralize_factors_per_section(df: pd.DataFrame, factor_cols: list,
+                                    section_col: str = "end_date",
+                                    industry_col: str = "industry",
+                                    apply_industry: bool = False) -> pd.DataFrame:
+    """
+    按截面分组做中性化（Qlib CSZScoreNorm 标准做法）
+
+    每个 section_col 唯一值（即一个截面）单独执行：
+      winsorize → cross_sectional_zscore [→ industry_neutralize]
+
+    apply_industry=False (默认):
+      仅做 winsorize + zscore，与 Qlib CSZScoreNorm 一致
+      保留因子绝对量级，不依赖行业内样本数
+
+    apply_industry=True:
+      额外做行业内排名（华泰金工/信达加强方案）
+      要求每个行业内有足够样本数（≥10），否则 rank(pct) 退化失真
+
+    Parameters
+    ----------
+    df : 含 section_col 字段的训练样本
+    factor_cols : 待中性化的因子列
+    section_col : 截面分组列（默认 "end_date"）
+    industry_col : 行业列（默认 "industry"，仅 apply_industry=True 时用）
+    apply_industry : 是否额外做行业内排名（默认 False）
+
+    Returns
+    -------
+    DataFrame: 同 shape，但因子列已被按截面中性化
+    """
+    if section_col not in df.columns:
+        # 退化为一次性中性化（向后兼容，但应避免使用）
+        logger.warning(
+            f"无 {section_col} 列，退化为全局中性化（不推荐）"
+        )
+        return neutralize_factors(df, factor_cols, industry_col)
+
+    df = df.copy()
+    # 预转 float 避免 int→float 赋值 FutureWarning
+    for col in factor_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+    sections = df[section_col].unique()
+
+    # 按截面循环，每个截面独立做完整流程
+    for section in sections:
+        mask = df[section_col] == section
+        sub = df.loc[mask].copy()
+        # 在该截面内做 winsorize + zscore
+        sub = winsorize_cross_section(sub, factor_cols)
+        sub = cross_sectional_zscore(sub, factor_cols)
+        # 可选: 行业内排名（要求每行业 ≥10 只样本，否则退化失真）
+        if apply_industry:
+            sub = industry_neutralize(sub, factor_cols, industry_col)
+        # 写回原 df
+        df.loc[mask, factor_cols] = sub[factor_cols].values
+
     return df

@@ -45,24 +45,45 @@ class TestIsTradeable:
     def test_sme_003(self):
         assert is_tradeable("003816") is True
 
-    # 科创板 应拒绝
+    # 科创板 应允许（50 万本金已达开户门槛）
     def test_star_688(self):
-        assert is_tradeable("688001") is False
+        assert is_tradeable("688001") is True
 
     def test_star_688_upper(self):
-        assert is_tradeable("688599") is False
+        assert is_tradeable("688599") is True
 
-    # 北交所 应拒绝
-    def test_bse_83(self):
+    # 北交所 已禁止（2026-05-02 起从池子移除：50 万门槛 + 历史回测表现差）
+    def test_bse_83_blocked(self):
         assert is_tradeable("830799") is False
 
-    def test_bse_43(self):
+    def test_bse_43_blocked(self):
         assert is_tradeable("430047") is False
 
-    def test_bse_87(self):
+    def test_bse_87_blocked(self):
         assert is_tradeable("870001") is False
 
-    # B股 应拒绝
+    def test_bse_88_blocked(self):
+        assert is_tradeable("880023") is False
+
+    # 北交所 2024 改版新代码段 (920) 也禁止
+    def test_bse_920_blocked(self):
+        assert is_tradeable("920001") is False
+
+    def test_bse_920_new(self):
+        assert is_tradeable("920857") is False
+
+    # 创业板新代码段 (301/302) 应允许
+    def test_gem_301(self):
+        assert is_tradeable("301001") is True
+
+    def test_gem_302(self):
+        assert is_tradeable("302001") is True
+
+    # 科创板新代码段 (689) 应允许
+    def test_star_689(self):
+        assert is_tradeable("689001") is True
+
+    # B股 应拒绝（需外汇账户）
     def test_b_sh_900(self):
         assert is_tradeable("900901") is False
 

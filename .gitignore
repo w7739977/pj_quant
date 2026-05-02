@@ -9,6 +9,7 @@ build/
 
 # Data & Models
 data/quant.db
+data/sim_trading.db*
 ml/models/*.json
 !ml/models/.gitkeep
 

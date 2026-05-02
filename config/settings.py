@@ -34,13 +34,12 @@ BACKTEST_END = "2025-12-31"
 # ============ 策略参数 ============
 MOMENTUM_LOOKBACK_DAYS = 20
 REBALANCE_DAYS = 40
-NUM_POSITIONS = 5
+NUM_POSITIONS = 10
 
 # ============ 止损止盈参数 ============
 STOP_LOSS_PCT = -0.08
 TAKE_PROFIT_PCT = 0.15
 MAX_HOLDING_DAYS = 20
-MIN_BUY_CAPITAL = 5000  # 单次买入触发的最低可用资金
 
 # ============ PushPlus 微信推送 ============
 PUSHPLUS_TOKEN = "6f113b0c12f84755bb5659319a6ea2c7"

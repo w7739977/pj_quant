@@ -75,8 +75,7 @@ def fetch_daily_by_date(pro, trade_dates, limit=0):
                 # 只保留需要的列
                 available_cols = [c for c in DAILY_FIELDS if c in df.columns]
                 df = df[available_cols]
-                # 排除北交所
-                df = df[~df["ts_code"].str.endswith(".BJ")]
+                # 全市场覆盖：含主板/创业板/科创板/北交所，B 股在下游 is_tradeable 过滤
                 df.to_parquet(parquet_path, index=False)
                 success += 1
             else:
@@ -114,8 +113,7 @@ def _process_parquet_batch(conn, batch_files, written_tables):
     batch_df = batch_df.rename(columns=col_map)
     batch_df["date"] = pd.to_datetime(batch_df["trade_date"], format="%Y%m%d")
 
-    # 排除科创板
-    batch_df = batch_df[~batch_df["code"].str.startswith("688")]
+    # 全市场入库：含科创板/北交所，B 股在下游 is_tradeable 过滤
 
     final_cols = ["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"]
     for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:
@@ -283,8 +281,7 @@ def import_to_sqlite_incremental(new_dates: list) -> int:
         batch_df = batch_df.rename(columns=col_map)
         batch_df["date"] = pd.to_datetime(batch_df["trade_date"], format="%Y%m%d")
 
-        # 排除科创板
-        batch_df = batch_df[~batch_df["code"].str.startswith("688")]
+        # 全市场入库：含科创板/北交所，B 股在下游 is_tradeable 过滤
 
         final_cols = ["date", "open", "high", "low", "close", "volume", "turnover", "pct_chg"]
         for c in ["open", "high", "low", "close", "volume", "turnover", "pct_chg"]:

@@ -25,6 +25,22 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+def _native(v):
+    """numpy 类型 → Python 原生类型（避免 JSON 序列化失败）"""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (np.integer,)):
+            return int(v)
+        if isinstance(v, (np.floating,)):
+            return float(v)
+        if isinstance(v, np.bool_):
+            return bool(v)
+    except (TypeError, ValueError):
+        pass
+    return v
+
+
 def allocate_capital(sentiment_score: float, total_capital: float,
                      aggressive: bool = False) -> dict:
     """
@@ -131,7 +147,7 @@ def get_stock_picks(stock_capital: float, top_n: int = 5) -> list:
 
     # Step 1: 多因子打分
     print("  计算多因子得分...")
-    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=1e10)
+    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=5e9)
     if factor_df.empty:
         return []
 
@@ -252,11 +268,11 @@ def check_holdings(tracker, stop_loss_pct: float = -0.08,
             reason = "止盈"
         elif buy_date:
             try:
-                from simulation.matcher import _calc_trade_days
-                days_held = _calc_trade_days(buy_date)
+                buy_dt = datetime.strptime(buy_date, "%Y-%m-%d")
+                days_held = (today - buy_dt).days
                 if days_held >= max_holding_days and abs(pnl_pct) < 0.03:
-                    reason = f"超时调仓(持有{days_held}交易日)"
-            except Exception:
+                    reason = f"超时调仓(持有{days_held}日)"
+            except ValueError:
                 pass
 
         if reason:
@@ -353,7 +369,7 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
 
     # Step 1: 计算因子（不含情绪，~40秒）
     print("  计算技术+基本面因子...")
-    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=1e10, skip_sentiment=True)
+    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=5e9, skip_sentiment=True)
     if factor_df.empty:
         return []
 
@@ -380,21 +396,37 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
     except Exception as e:
         logger.warning(f"ML 预测失败: {e}")
 
-    # Step 4: 综合排名
+    # Step 4: 综合排名（ML 主导 70% + 多因子 30%）
     candidates = scored.head(50).copy()
     candidates["ml_rank"] = candidates["code"].map(ml_rank_map).fillna(999).astype(int)
+    candidates["predicted_return"] = candidates["code"].map(
+        dict(zip(pred["code"], pred["predicted_return"])) if not pred.empty else {}
+    ).fillna(0)
     candidates["in_both"] = (
         (candidates["factor_rank"] <= 20) & (candidates["ml_rank"] <= 20)
     ).astype(int)
-    candidates["final_score"] = (
-        1.0 / candidates["factor_rank"] * 100
-        + 1.0 / candidates["ml_rank"] * 50
-        + candidates["in_both"] * 20
-    )
+
+    # 综合得分（ML 50% + 因子 50%，券商资管标准等权配置）
+    # 实测 (2026-05-02 14 日回测) 50/50 优于 70/30：
+    #   5d alpha 均值: -1.65% (50/50) vs -2.46% (70/30)，胜率 42.2% vs 40.0%
+    # 详见 docs/optimization_backlog.md
+    ml_pred = candidates["predicted_return"].fillna(0)
+    factor_score = candidates["score"].fillna(0)
+    ml_norm = (ml_pred - ml_pred.mean()) / (ml_pred.std() + 1e-8)
+    factor_norm = (factor_score - factor_score.mean()) / (factor_score.std() + 1e-8)
+    candidates["final_score"] = ml_norm * 0.5 + factor_norm * 0.5
     candidates = candidates.sort_values("final_score", ascending=False)
 
     # Step 4.5: 计算各维度得分拆解（技术面/基本面/资金面）
     candidates = _calc_dimension_scores(candidates, factor_df)
+
+    # 缓存今日 top N final_score（共识选股 D 方案的输入）
+    try:
+        from portfolio.consensus import cache_scored
+        today = datetime.now().strftime("%Y-%m-%d")
+        cache_scored(today, candidates[["code", "final_score"]], top_n=top_n)
+    except Exception as e:
+        logger.warning(f"scored 缓存失败（非关键）: {e}")
 
     # 过滤: 可交易 + 未持有
     filtered = candidates[
@@ -404,7 +436,33 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
     if filtered.empty:
         return []
 
-    # Step 5: 批量获取实时价格
+    return _finalize_picks(filtered, candidates, pred, ml_rank_map,
+                           stock_capital, top_n)
+
+
+def _finalize_picks(filtered: pd.DataFrame, candidates: pd.DataFrame,
+                    pred: pd.DataFrame, ml_rank_map: dict,
+                    stock_capital: float, top_n: int,
+                    extra_reason: str = "") -> list:
+    """
+    把已选 candidates 行 → 实盘可执行 picks 列表
+
+    职责：实时价格 + 100 股整手 + reason_data 构建 + 资金流向 + 8 维度分析
+    （日频和共识两条选股路径共用此后段）
+
+    Parameters
+    ----------
+    filtered : 已选候选（含 final_score, factor_rank, ml_rank 等列）
+    candidates : 全 candidates DataFrame（用于 8 维度分析的 factor_df 兜底）
+    pred : ML 预测 DataFrame
+    ml_rank_map : code → ml_rank 映射
+    stock_capital : 总仓位资金
+    top_n : 最终保留股票数
+    extra_reason : 额外 reason 后缀（如共识模式标记 "5天共识#3"）
+    """
+    from data.fetcher import fetch_realtime_tencent_batch
+    from portfolio.trade_utils import calc_shares, estimate_buy_cost
+
     codes = filtered["code"].tolist()
     try:
         rt_df = fetch_realtime_tencent_batch(codes)
@@ -421,13 +479,11 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         code = row["code"]
         name = str(row.get("name", ""))
         vol = row.get("volume", 0)
-        # 过滤 ST 和停牌
         if "ST" in name or vol == 0:
             continue
         price_map[code] = float(row.get("price", 0))
         name_map[code] = name
 
-    # ---- 收益最大化: 按 final_score 加权分配资金 ----
     valid_candidates = []
     for _, row in filtered.iterrows():
         code = row["code"]
@@ -443,11 +499,15 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         return []
 
     scores = np.array([float(r["final_score"]) for r, _, _, _ in valid_candidates])
-    alloc_weights = scores / scores.sum()
+    # 防御：所有 score 都同号或为 0 时退化为等权
+    if scores.sum() <= 0:
+        alloc_weights = np.ones(len(scores)) / len(scores)
+    else:
+        alloc_weights = scores / scores.sum()
 
     picks = []
     for (row, code, price, name), w in zip(valid_candidates, alloc_weights):
-        alloc = round(stock_capital * w, -2)  # 百位取整
+        alloc = round(stock_capital * w, -2)
         share_info = calc_shares(alloc, price)
         if share_info["shares"] < 100:
             continue
@@ -459,12 +519,12 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         ml_rank = int(row["ml_rank"])
         tag = "★双重确认" if row["in_both"] else ""
 
-        # 构建详细理由：排名 + 关键因子指标 + ML预测收益
         reason_parts = [f"因子#{factor_rank} ML#{ml_rank}"]
+        if extra_reason:
+            reason_parts.append(extra_reason)
         if tag:
             reason_parts.append(tag)
 
-        # 提取 top3 关键因子值
         key_factors = []
         for fac in ["mom_20d", "vol_10d", "pe_ttm", "pb", "turnover_rate"]:
             val = row.get(fac)
@@ -476,39 +536,20 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
         if key_factors:
             reason_parts.append("|".join(key_factors[:3]))
 
-        # ML预测收益
-        ml_pred = ml_rank_map.get(code)
-        if ml_pred is not None:
-            pred_row = pred[pred["code"] == code]
-            if not pred_row.empty:
-                pred_ret = pred_row.iloc[0].get("predicted_return", 0)
-                if pred_ret is not None:
-                    reason_parts.append(f"预测20日收益:{pred_ret:+.1%}")
+        pred_row = pred[pred["code"] == code] if not pred.empty else pd.DataFrame()
+        if ml_rank_map.get(code) is not None and not pred_row.empty:
+            pred_ret = pred_row.iloc[0].get("predicted_return", 0)
+            if pred_ret is not None:
+                reason_parts.append(f"预测20日收益:{pred_ret:+.1%}")
 
         reason_parts.append(f"仓位{w:.0%}")
         reason = " ".join(reason_parts)
-
-        # 安全转换 numpy 类型 → Python 原生类型（避免 JSON 序列化失败）
-        def _native(v):
-            if v is None:
-                return None
-            try:
-                if isinstance(v, (np.integer,)):
-                    return int(v)
-                if isinstance(v, (np.floating,)):
-                    return float(v)
-                if isinstance(v, np.bool_):
-                    return bool(v)
-            except (TypeError, ValueError):
-                pass
-            return v
 
         dim_scores_raw = {
             "技术面": _native(row.get("技术面_score")),
             "基本面": _native(row.get("基本面_score")),
             "资金面": _native(row.get("资金面_score")),
         }
-        # 每个维度的具体因子值，用于推荐理由明细
         dim_details = {
             "技术面": {
                 "5日涨幅": _native(row.get("mom_5d")),
@@ -537,6 +578,32 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             if not pred_row.empty else None
         )
 
+        reason_data = {
+            "factor_rank": factor_rank,
+            "ml_rank": ml_rank,
+            "in_both": bool(row["in_both"]),
+            "weight": round(float(w), 4),
+            "final_score": round(float(row["final_score"]), 2),
+            "dimension_scores": dim_scores_raw,
+            "dimension_details": dim_details,
+            "key_factors": {
+                "mom_20d": _native(row.get("mom_20d")),
+                "pe_ttm": _native(row.get("pe_ttm")),
+                "pb": _native(row.get("pb")),
+                "vol_10d": _native(row.get("vol_10d")),
+                "turnover_rate": _native(row.get("turnover_rate")),
+                "roe_yearly": _native(row.get("roe_yearly")),
+                "or_yoy": _native(row.get("or_yoy")),
+                "dt_eps_yoy": _native(row.get("dt_eps_yoy")),
+                "debt_to_assets": _native(row.get("debt_to_assets")),
+            },
+            "predicted_return": pred_ret_val,
+        }
+        # 共识模式额外携带 freq + days_available
+        for col in ("consensus_freq", "consensus_avg_score", "consensus_days"):
+            if col in row:
+                reason_data[col] = _native(row[col])
+
         picks.append({
             "code": code,
             "name": name,
@@ -545,31 +612,211 @@ def get_stock_picks_live(stock_capital: float, top_n: int = 3,
             "amount": float(amount),
             "cost": float(cost),
             "reason": reason,
-            "reason_data": {
-                "factor_rank": factor_rank,
-                "ml_rank": ml_rank,
-                "in_both": bool(row["in_both"]),
-                "weight": round(float(w), 4),
-                "final_score": round(float(row["final_score"]), 2),
-                "dimension_scores": dim_scores_raw,
-                "dimension_details": dim_details,
-                "key_factors": {
-                    "mom_20d": _native(row.get("mom_20d")),
-                    "pe_ttm": _native(row.get("pe_ttm")),
-                    "pb": _native(row.get("pb")),
-                    "vol_10d": _native(row.get("vol_10d")),
-                    "turnover_rate": _native(row.get("turnover_rate")),
-                },
-                "predicted_return": pred_ret_val,
-            },
+            "reason_data": reason_data,
             "final_score": round(float(row["final_score"]), 2),
             "dimension_scores": dim_scores_raw,
         })
 
+    # 资金流向（补充展示）
+    if picks:
+        try:
+            from data.fetcher import fetch_capital_flow_batch
+            pick_codes = [p["code"] for p in picks]
+            flow_data = fetch_capital_flow_batch(pick_codes)
+            for p in picks:
+                flow = flow_data.get(p["code"])
+                if flow:
+                    p["capital_flow"] = flow
+                    if "reason_data" in p and isinstance(p["reason_data"], dict):
+                        p["reason_data"]["capital_flow"] = flow
+            if flow_data:
+                print(f"  资金流向: {len(flow_data)}/{len(pick_codes)} 只获取成功")
+        except Exception as e:
+            logger.warning(f"资金流向获取失败(非关键): {e}")
+
+    # 8 维度分析
+    if picks:
+        try:
+            from analysis.eight_dimensions import enrich_picks_with_dimensions
+            picks = enrich_picks_with_dimensions(picks, factor_df=candidates)
+            print(f"  8维度分析: {len(picks)} 只完成")
+        except Exception as e:
+            logger.warning(f"8维度分析失败(非关键): {e}")
+
     return picks
 
 
-def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
+def refresh_today_scored_cache(top_n: int = 10) -> int:
+    """
+    仅计算并缓存今日 top N 的 final_score（monitor-only 模式用）
+
+    跑完整 factor + ML + 50/50 加权 → 写入 daily_scored_cache，
+    不构建 picks（不需要实时价格、整手等）。
+
+    Returns
+    -------
+    int : 缓存入库行数（0 表示失败）
+    """
+    from portfolio.trade_utils import is_tradeable
+    from factors.calculator import compute_stock_pool_factors
+    from strategy.small_cap import SmallCapStrategy
+    from portfolio.consensus import cache_scored
+
+    print("  [monitor-only] 缓存今日 scored（供下周一共识）...")
+    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=5e9, skip_sentiment=True)
+    if factor_df.empty:
+        return 0
+    factor_df = factor_df[factor_df["code"].apply(is_tradeable)]
+
+    sc = SmallCapStrategy(top_n=50)
+    scored = sc._score_stocks(factor_df).sort_values("score", ascending=False)
+    scored["factor_rank"] = range(1, len(scored) + 1)
+
+    pred = pd.DataFrame()
+    try:
+        from ml.ranker import predict
+        pred = predict(factor_df)
+    except Exception as e:
+        logger.warning(f"ML 预测失败: {e}")
+
+    candidates = scored.head(50).copy()
+    candidates["predicted_return"] = candidates["code"].map(
+        dict(zip(pred["code"], pred["predicted_return"])) if not pred.empty else {}
+    ).fillna(0)
+    ml_pred = candidates["predicted_return"].fillna(0)
+    factor_score = candidates["score"].fillna(0)
+    ml_norm = (ml_pred - ml_pred.mean()) / (ml_pred.std() + 1e-8)
+    factor_norm = (factor_score - factor_score.mean()) / (factor_score.std() + 1e-8)
+    candidates["final_score"] = ml_norm * 0.5 + factor_norm * 0.5
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    n = cache_scored(today, candidates[["code", "final_score"]], top_n=top_n)
+    print(f"  ✓ 缓存 {today}: top {n} 入库")
+    return n
+
+
+def get_stock_picks_consensus(stock_capital: float, top_n: int = 10,
+                              exclude_codes: list = None,
+                              window: int = 5) -> list:
+    """
+    共识选股（D 方案）— 基于过去 window 个交易日 top 10 缓存的频次共识
+
+    流程：
+      1. 跑当日完整 factor + ML + scoring（与 live 模式一致，并把今日 top 10 入 cache）
+      2. 从 cache 加载过去 window 天的 top 10
+      3. 频次共识排序：(出现次数, 平均得分) 降序
+      4. 取共识 top N → 用今日 candidates 的因子值/价格构建 picks
+
+    缓存不足时 (days < window) 自动回退到日频 live 选股。
+
+    实证：4 个月回测 +1.15% 周均 alpha，13 周累计 +15.69%，胜率 69.2%（vs 日频 +0.41%）
+
+    Returns
+    -------
+    list of dict（结构同 get_stock_picks_live）
+    """
+    from data.fetcher import fetch_realtime_tencent_batch
+    from portfolio.trade_utils import is_tradeable
+    from factors.calculator import compute_stock_pool_factors
+    from portfolio.consensus import cache_scored, consensus_picks
+
+    exclude = set(exclude_codes or [])
+
+    # Step 1: 计算因子（与 live 一致）
+    print("  [共识模式] 计算技术+基本面因子...")
+    factor_df = compute_stock_pool_factors(min_cap=5e8, max_cap=5e9, skip_sentiment=True)
+    if factor_df.empty:
+        return []
+    factor_df = factor_df[factor_df["code"].apply(is_tradeable)]
+
+    # Step 2: 多因子打分
+    from strategy.small_cap import SmallCapStrategy
+    sc = SmallCapStrategy(top_n=50)
+    scored = sc._score_stocks(factor_df).sort_values("score", ascending=False)
+    scored["factor_rank"] = range(1, len(scored) + 1)
+
+    # Step 3: ML 预测
+    ml_rank_map: dict = {}
+    pred = pd.DataFrame()
+    try:
+        from ml.ranker import predict
+        print("  [共识模式] ML 模型预测...")
+        pred = predict(factor_df)
+        if not pred.empty:
+            for _, row in pred.iterrows():
+                ml_rank_map[row["code"]] = int(row["rank"])
+    except Exception as e:
+        logger.warning(f"ML 预测失败: {e}")
+
+    # Step 4: 综合得分（50/50 等权，与 live 一致）
+    candidates = scored.head(50).copy()
+    candidates["ml_rank"] = candidates["code"].map(ml_rank_map).fillna(999).astype(int)
+    candidates["predicted_return"] = candidates["code"].map(
+        dict(zip(pred["code"], pred["predicted_return"])) if not pred.empty else {}
+    ).fillna(0)
+    candidates["in_both"] = (
+        (candidates["factor_rank"] <= 20) & (candidates["ml_rank"] <= 20)
+    ).astype(int)
+    ml_pred = candidates["predicted_return"].fillna(0)
+    factor_score = candidates["score"].fillna(0)
+    ml_norm = (ml_pred - ml_pred.mean()) / (ml_pred.std() + 1e-8)
+    factor_norm = (factor_score - factor_score.mean()) / (factor_score.std() + 1e-8)
+    candidates["final_score"] = ml_norm * 0.5 + factor_norm * 0.5
+    candidates = candidates.sort_values("final_score", ascending=False)
+
+    candidates = _calc_dimension_scores(candidates, factor_df)
+
+    # 缓存今日 top N
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        cache_scored(today, candidates[["code", "final_score"]], top_n=top_n)
+    except Exception as e:
+        logger.warning(f"scored 缓存失败（非关键）: {e}")
+
+    # Step 5: 共识选股 — 从 cache 拿过去 window 天的频次排名
+    cons = consensus_picks(end_date=today, window=window, top_n=top_n * 3)
+    if not cons:
+        logger.warning(f"共识缓存为空，回退到日频 top {top_n}")
+        return get_stock_picks_live(stock_capital, top_n, exclude_codes=exclude_codes)
+
+    days_avail = cons[0]["days_available"] if cons else 0
+    if days_avail < window:
+        print(f"  ⚠ cache 仅 {days_avail}/{window} 天，结果稳定性下降")
+
+    # Step 6: 把共识结果映射到今日 candidates 行
+    cons_codes = [c["code"] for c in cons]
+    candidates_idx = candidates.set_index("code", drop=False)
+    selected_rows = []
+    for c in cons:
+        code = c["code"]
+        if code in exclude:
+            continue
+        if code not in candidates_idx.index:
+            # 共识池外的股票（市值变化、停牌等）跳过
+            continue
+        row = candidates_idx.loc[code].copy()
+        row["consensus_freq"] = c["freq"]
+        row["consensus_avg_score"] = c["avg_score"]
+        row["consensus_days"] = days_avail
+        selected_rows.append(row)
+        if len(selected_rows) >= top_n * 2:  # 留余量给 ST/停牌过滤
+            break
+
+    if not selected_rows:
+        logger.warning("共识结果与今日池子无交集，回退到日频")
+        return get_stock_picks_live(stock_capital, top_n, exclude_codes=exclude_codes)
+
+    filtered = pd.DataFrame(selected_rows).reset_index(drop=True)
+    print(f"  共识选股: {len(filtered)} 只候选 (cache {days_avail}/{window} 天)")
+
+    # Step 7: 价格 + 整手 + reason 构建（与 live 共用）
+    extra = f"5天共识(频次{filtered.iloc[0].get('consensus_freq', 0)}/{days_avail})"
+    return _finalize_picks(filtered, candidates, pred, ml_rank_map,
+                           stock_capital, top_n, extra_reason=extra)
+
+
+def run_live_deploy(push: bool = False, simulate: bool = False,
+                    consensus: bool = False, monitor_only: bool = False) -> dict:
     """
     激进实盘部署 — 生成精确操作清单
 
@@ -581,6 +828,13 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
       5. 选股 (实时价格 + 100股整手)
       6. simulate模式: 再执行买入，输出模拟结果
       7. 推送
+
+    Parameters
+    ----------
+    push : bool          是否推送到微信
+    simulate : bool      模拟盘（更新虚拟持仓）
+    consensus : bool     共识选股模式（D 方案，5 天频次共识，建议周一启用）
+    monitor_only : bool  仅监控持仓（不选新股，建议周二~周五启用）
     """
     from config.settings import (
         INITIAL_CAPITAL, ETF_POOL,
@@ -673,14 +927,28 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
         slots = NUM_POSITIONS
 
     buy_actions = []
-    from config.settings import MIN_BUY_CAPITAL
-    if slots > 0 and available_cash >= MIN_BUY_CAPITAL:
+    if monitor_only:
+        print(f"  monitor-only 模式：跳过新股选取，仅维护持仓")
+        # 仍需缓存今日 scored 供下周一共识使用
+        try:
+            refresh_today_scored_cache(top_n=NUM_POSITIONS)
+        except Exception as e:
+            logger.warning(f"今日 scored 缓存失败（非关键）: {e}")
+    elif slots > 0 and available_cash >= 5000:
         exclude_codes = list(tracker.holdings.keys())
-        buy_actions = get_stock_picks_live(
-            stock_capital=available_cash,
-            top_n=slots,
-            exclude_codes=exclude_codes,
-        )
+        if consensus:
+            print(f"  共识模式 (D 方案，5 天频次共识，建议周一)")
+            buy_actions = get_stock_picks_consensus(
+                stock_capital=available_cash,
+                top_n=slots,
+                exclude_codes=exclude_codes,
+            )
+        else:
+            buy_actions = get_stock_picks_live(
+                stock_capital=available_cash,
+                top_n=slots,
+                exclude_codes=exclude_codes,
+            )
         if buy_actions:
             print(f"  选出 {len(buy_actions)} 只:")
             for a in buy_actions:
@@ -772,13 +1040,33 @@ def run_live_deploy(push: bool = False, simulate: bool = False) -> dict:
     }
 
 
+def _simulate_execution_live(tracker, sell_actions: list, buy_actions: list):
+    """模拟执行操作清单，更新虚拟持仓"""
+    from portfolio.trade_utils import estimate_buy_cost, estimate_sell_cost
+
+    # 先卖后买
+    for a in sell_actions:
+        price = a["price"]
+        amount = price * a["shares"]
+        cost = estimate_sell_cost(amount)
+        tracker.update_after_sell(a["code"], price, cost)
+        print(f"  [模拟卖出] {a['code']} {a['shares']}股 @ {price:.2f}")
+
+    for a in buy_actions:
+        price = a["price"]
+        shares = a["shares"]
+        cost = a.get("cost", estimate_buy_cost(price * shares))
+        tracker.update_after_buy(a["code"], shares, price, cost)
+        print(f"  [模拟买入] {a['code']} {shares}股 @ {price:.2f}")
+
+
 # ============ 保留原有 deploy 命令 ============
 
 def run_deploy(push: bool = False, simulate: bool = False) -> dict:
     """
     生成今日完整操作清单（标准模式：ETF + 个股）
     """
-    from config.settings import INITIAL_CAPITAL, ETF_POOL, MIN_BUY_CAPITAL
+    from config.settings import INITIAL_CAPITAL, ETF_POOL
     from portfolio.tracker import PortfolioTracker
 
     print("\n" + "=" * 60)
@@ -826,7 +1114,7 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
     # 3b. 个股推荐
     print("  个股精选...")
     stock_picks = []
-    if alloc["stock_capital"] >= MIN_BUY_CAPITAL:
+    if alloc["stock_capital"] >= 5000:
         stock_picks = get_stock_picks(alloc["stock_capital"], top_n=5)
 
     # ============ 生成操作清单 ============
@@ -893,8 +1181,8 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
 
     # ============ 模拟执行 ============
     if simulate:
-        # standard deploy --simulate 已弃用，请使用 live --simulate
-        print("\n  提示: standard deploy --simulate 已弃用，请使用 live --simulate")
+        _simulate_execution(tracker, actions, alloc)
+        print("\n虚拟持仓已更新")
 
     # ============ 推送 ============
     if push:
@@ -907,6 +1195,18 @@ def run_deploy(push: bool = False, simulate: bool = False) -> dict:
         "actions": actions,
         "stock_picks": stock_picks,
     }
+
+
+def _simulate_execution(tracker, actions: list, alloc: dict):
+    """模拟执行操作清单，更新虚拟持仓"""
+    for a in actions:
+        if a["action"] == "买入" and a["code"] != "当前持仓":
+            tracker.update_after_buy(
+                a["code"],
+                shares=1,
+                price=a["amount"],
+                cost=0,
+            )
 
 
 def _push_deploy_report(actions, alloc, sent_score, top_news, deep):

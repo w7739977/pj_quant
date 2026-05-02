@@ -1,5 +1,7 @@
 # A 股量化交易系统 — 云主机部署指南
 
+> 📌 **D 方案部署专项**：见 [`docs/D_STRATEGY_DEPLOY.md`](docs/D_STRATEGY_DEPLOY.md)（5 天频次共识选股 + 周一/周二~五自动切换）
+
 本文档面向运维工程师，说明在云主机上从零部署 **pj_quant** 到日常运维的全流程。项目仓库：<https://github.com/w7739977/pj_quant.git>
 
 ---
@@ -165,18 +167,42 @@ python3 scripts/preflight.py
 
 ## 四、模型训练
 
-训练 XGBoost 选股模型（约 5-15 分钟，取决于数据量）：
+> ⚠️ **`ml/models/*.json` 在 `.gitignore` 中，不会随仓库下发**。新机器部署必须本地训练或从其他机器复制模型文件。
+
+### 推荐：用 evolve 一键训练（约 5 分钟）
 
 ```bash
-python3 main.py train
+python3 main.py evolve
 ```
 
-预期输出包含：
+evolve 会：
+1. 跑因子计算（含 P0 财务因子 PIT、跳过情绪）
+2. 准备训练数据（滚动截面 + 1%/99% winsorize）
+3. 训练 XGBoost + 时间序列 CV
+4. 自动对比新旧模型，更优才上线
 
-- 训练样本数: 80000+ 条
-- 交叉验证 R²: > 0.02（通常 0.05-0.10）
-- 特征重要性排名
+预期输出：
+- 训练样本数: 100000+ 条（剔除北交所后 ~110k）
+- 交叉验证 R²: 0.06-0.08（baseline 0.0719）
+- 特征重要性排名（top 应是 avg_turnover_5d / vol_10d / mom_*）
 - 模型保存到 `ml/models/xgb_ranker.json`
+
+### 快速复制（非首次部署）
+
+如果已有训练好的模型，直接复制到目标机器即可：
+
+```bash
+# 在源机器
+scp ml/models/xgb_ranker.json user@target-host:/path/to/pj_quant/ml/models/
+scp ml/models/feature_importance.json user@target-host:/path/to/pj_quant/ml/models/
+scp ml/models/model_history.json user@target-host:/path/to/pj_quant/ml/models/
+```
+
+### 旧版 train 命令（兼容）
+
+```bash
+python3 main.py train     # 不带版本管理，仅训练保存
+```
 
 验证：
 
@@ -397,6 +423,73 @@ crontab -l
 
 ---
 
+## 8.5、模拟盘
+
+模拟盘是独立于实盘的自动化模拟交易系统，**盘中用真实行情价格撮合**，收盘后推送日报。
+
+### 运行机制
+
+```
+cron 09:05 触发 → 判断交易日 → 启动引擎
+  09:25  盘前准备（加载昨日计划）
+  09:30  开盘，每3分钟轮询真实行情撮合
+  11:30  午休暂停
+  13:00  下午盘继续
+  14:58  停止交易
+  15:00  收盘结算 → 快照 → 生成明日计划 → 推送微信 → 自动退出
+```
+
+- 交易日判断: `chinesecalendar` 排除周末+法定节假日
+- 非交易日自动跳过，无需手动干预
+
+### 手动操作
+
+```bash
+# 查看状态
+python3 main.py sim
+
+# 离线调试（非盘中，不推送）
+python3 main.py sim --run-once
+
+# 手动启动盘中交易（测试用）
+python3 -u main.py sim --start --push
+
+# 日报/周报/历史
+python3 main.py sim --report
+python3 main.py sim --report --weekly
+python3 main.py sim --history
+
+# 重置（清空所有持仓和数据）
+python3 main.py sim --reset
+```
+
+### 数据文件
+
+| 文件 | 说明 |
+|------|------|
+| `data/sim_trading.db` | SQLite 独立库（订单/成交/每日快照） |
+| `data/sim_portfolio.json` | 模拟盘持仓 |
+| `data/sim_daily_plan.json` | 明日操作计划 |
+
+### 定时任务（已配置）
+
+```cron
+# 模拟盘盘中交易引擎（每天09:05，内部判断交易日）
+5 9 * * * bash run_sim_daily.sh >> logs/sim_daily.log 2>&1
+```
+
+### 日志查看
+
+```bash
+# 实时跟踪
+tail -f logs/sim_daily.log
+
+# 查看进程
+cat /tmp/pj_quant_sim.pid && ps -p $(cat /tmp/pj_quant_sim.pid)
+```
+
+---
+
 ## 九、故障排查
 
 ### 1. preflight 失败告警
@@ -482,6 +575,17 @@ send_message('测试', '部署验证', PUSHPLUS_TOKEN)"
 | `python3 main.py portfolio --reset` | 重置 |
 | `python3 main.py portfolio --buy CODE --shares N --price X` | 模拟买入 |
 | `python3 main.py portfolio --sell CODE --price X` | 模拟卖出 |
+
+**模拟盘：**
+
+| 命令 | 说明 |
+|------|------|
+| `python3 main.py sim` | 查看模拟盘状态 |
+| `python3 main.py sim --start [--push]` | 启动常驻进程 |
+| `python3 main.py sim --run-once [--push]` | 单次执行 |
+| `python3 main.py sim --report [--weekly]` | 日报/周报 |
+| `python3 main.py sim --history` | 历史交易 |
+| `python3 main.py sim --reset` | 重置 |
 
 **运维：**
 

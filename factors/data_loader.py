@@ -24,30 +24,37 @@ def _safe_table_name(code: str) -> str:
 
 # ============ 股票池筛选 ============
 
+def _filter_tradeable(df: pd.DataFrame) -> pd.DataFrame:
+    """剔除不可交易板块（B 股 / 北交所），保留 A 股主板/创业板/科创板"""
+    if df.empty:
+        return df
+    from portfolio.trade_utils import is_tradeable
+    mask = df["code"].apply(is_tradeable)
+    dropped = (~mask).sum()
+    if dropped > 0:
+        logger.info(f"  剔除不可交易板块（B 股/北交所）: {dropped} 只")
+    return df[mask].reset_index(drop=True)
+
+
 def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataFrame:
     """
-    获取小市值股票池（汇总表 → 逐表 SQL → 腾讯 API → AKShare 多级降级）
+    获取股票池（汇总表 → 本地SQLite → 腾讯API → AKShare 多级降级）
 
     Parameters
     ----------
-    min_cap : float  最小市值（元），默认 5 亿
-    max_cap : float  最大市值（元），默认 50 亿
+    min_cap : float  最小市值（元），默认 5 亿（排除流动性枯竭的超小盘）
+    max_cap : float  最大市值（元），默认 50 亿（聚焦小盘，业界 IC 最优区间）
 
     Returns
     -------
     DataFrame: columns [code, market_cap]
     """
-    cached = list_cached_stocks()
-    if not cached:
-        logger.warning("本地无缓存股票，尝试 AKShare")
-        return _fallback_akshare(min_cap, max_cap)
-
     # M6: 优先用 latest_market_cap 汇总表（单条 SQL，毫秒级）
     try:
         from data.storage import query_market_cap_range, refresh_latest_market_cap
         results = query_market_cap_range(min_cap, max_cap)
         if not results:
-            # 表不存在或为空 → 尝试 lazy refresh 一次
+            # 表不存在或为空 → 尝试 lazy refresh 一次（首次部署）
             n = refresh_latest_market_cap()
             if n > 0:
                 results = query_market_cap_range(min_cap, max_cap)
@@ -55,12 +62,19 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
 
         if results:
             stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
+            stock_df = _filter_tradeable(stock_df)
             logger.info(f"汇总表 mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
             return stock_df
     except Exception as e:
         logger.warning(f"汇总表查询失败: {e}")
 
-    # 退化路径：逐表 SQL（4400 次往返，2-3s）
+    # 优先从本地缓存获取股票列表
+    cached = list_cached_stocks()
+    if not cached:
+        logger.warning("本地无缓存股票，尝试 AKShare")
+        return _fallback_akshare(min_cap, max_cap)
+
+    # 优先从本地 SQLite 读 total_mv
     try:
         from config.settings import DB_PATH
         conn = sqlite3.connect(DB_PATH)
@@ -84,7 +98,8 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
 
         if results:
             stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
-            logger.info(f"本地逐表 total_mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
+            stock_df = _filter_tradeable(stock_df)
+            logger.info(f"本地 total_mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
             return stock_df
         else:
             logger.warning("本地 total_mv 全为空，fallback 到腾讯 API")
@@ -116,6 +131,7 @@ def _fallback_tencent(cached: list, min_cap: float, max_cap: float) -> pd.DataFr
                 (stock_df["market_cap"] >= min_cap) & (stock_df["market_cap"] <= max_cap)
             ]
             stock_df = stock_df.sort_values("market_cap").reset_index(drop=True)
+            stock_df = _filter_tradeable(stock_df)
             logger.info(f"腾讯 API 兜底: {len(stock_df)} 只")
             return stock_df
     except Exception as e:
@@ -137,7 +153,8 @@ def _fallback_akshare(min_cap: float, max_cap: float) -> pd.DataFrame:
         df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
         df = df[(df["market_cap"] >= min_cap) & (df["market_cap"] <= max_cap)]
         df = df[~df["name"].str.contains("ST|退|N", na=False)]
-        df = df[~df["code"].str.startswith(("8", "688"))]
+        # 通过 is_tradeable 统一过滤（剔除 B 股 + 北交所，保留科创板 688）
+        df = _filter_tradeable(df)
         df = df.sort_values("market_cap").reset_index(drop=True)
         logger.info(f"AKShare 股票池: {len(df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
         return df

@@ -52,6 +52,59 @@ def humanize_reason(reason_data: dict, name: str = "",
     if header_parts:
         parts.append("、".join(header_parts))
 
+    # ---- 财务因子关键指标 ----
+    kf = reason_data.get("key_factors") or {}
+
+    roe = kf.get("roe_yearly")
+    if roe is not None:
+        try:
+            v = float(roe)
+            if v > 15:
+                parts.append(f"高 ROE({v:.0f}%)")
+            elif v > 8:
+                parts.append(f"ROE 良好({v:.0f}%)")
+            elif v < 0:
+                parts.append(f"亏损 ROE({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
+    or_yoy = kf.get("or_yoy")
+    if or_yoy is not None:
+        try:
+            v = float(or_yoy)
+            if v > 30:
+                parts.append(f"营收高增({v:.0f}%)")
+            elif v > 10:
+                parts.append(f"营收增长({v:.0f}%)")
+            elif v < -10:
+                parts.append(f"营收下滑({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
+    dt_eps_yoy = kf.get("dt_eps_yoy")
+    if dt_eps_yoy is not None:
+        try:
+            v = float(dt_eps_yoy)
+            if v > 30:
+                parts.append(f"扣非EPS高增({v:.0f}%)")
+            elif v > 10:
+                parts.append(f"盈利改善({v:.0f}%)")
+            elif v < -30:
+                parts.append(f"盈利下滑({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
+    debt = kf.get("debt_to_assets")
+    if debt is not None:
+        try:
+            v = float(debt)
+            if v > 80:
+                parts.append(f"高负债({v:.0f}%)")
+            elif v < 30:
+                parts.append(f"低负债({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
     # ---- 维度得分（三维度分行展示） ----
     dim_scores = reason_data.get("dimension_scores")
     dim_details = reason_data.get("dimension_details")
@@ -106,6 +159,38 @@ def humanize_reason(reason_data: dict, name: str = "",
         flow_part = _format_capital_flow(cf)
         if flow_part:
             sub_lines.append(f"  资金面｜{flow_part}")
+
+    # ---- 8 维度分析展示 ----
+    dims = reason_data.get("eight_dimensions") or {}
+    if dims:
+        sub_lines.append("  8维度分析:")
+        for dim_name, info in dims.items():
+            score = info.get("score", 50)
+            tier = "优" if score >= 70 else "良" if score >= 50 else "弱"
+            dim_items = info.get("items", [])
+            item_str = ", ".join(
+                f"{it['name']}={it['value']}{'('+it['label']+')' if it.get('label') else ''}"
+                for it in dim_items[:2]
+            )
+            if item_str:
+                sub_lines.append(f"    {dim_name} {score}({tier}) | {item_str}")
+            else:
+                sub_lines.append(f"    {dim_name} {score}({tier})")
+
+    # ---- 交易建议 ----
+    ts = reason_data.get("trade_suggestion") or {}
+    if ts:
+        sub_lines.append(
+            f"  建议: 目标 {ts.get('target_price')} (+{ts.get('predicted_return_pct')}%) "
+            f"/ 止损 {ts.get('stop_loss')} ({ts.get('stop_loss_pct')*100:.0f}%) "
+            f"/ 风险收益比 {ts.get('risk_reward_ratio')}"
+        )
+
+    # ---- AI 综合解读 ----
+    if dims:
+        summary = ai_eight_dimensions_summary(reason_data, name=name)
+        if summary:
+            sub_lines.append(f"  AI研判: {summary}")
 
     # ---- 拼装输出 ----
     prefix = f"{name}：" if name else ""
@@ -384,3 +469,61 @@ def _legacy_humanize(reason: str, name: str = "") -> str:
         prefix = f"{name}：" if name else ""
         return f"{prefix}{'，'.join(parts)}"
     return reason
+
+
+def ai_eight_dimensions_summary(reason_data: dict, name: str = "") -> str:
+    """
+    GLM-4-flash 综合 8 维度 + ML/因子 → 一句话推荐总结
+    """
+    try:
+        from config.settings import LLM_API_KEY, LLM_BASE_URL
+        import requests as _requests
+    except ImportError:
+        return ""
+    if not LLM_API_KEY:
+        return ""
+
+    dims = reason_data.get("eight_dimensions", {})
+    if not dims:
+        return ""
+
+    # 构建维度摘要
+    dim_lines = []
+    for dim_name, info in dims.items():
+        score = info.get("score", 50)
+        items_summary = ", ".join(
+            f"{it['name']}={it['value']}" for it in info.get("items", [])[:2]
+        )
+        dim_lines.append(f"{dim_name} {score}分: {items_summary}")
+
+    industry = reason_data.get("industry", "未知")
+    pred_return = reason_data.get("predicted_return", 0)
+
+    prompt = f"""你是A股量化分析师。请基于以下8维度分析+ML预测，给{name}一句话推荐总结（80字内，面向普通投资者）。
+
+行业: {industry}
+ML预测20日收益: {pred_return*100:+.1f}%
+8维度评分:
+{chr(10).join(dim_lines)}
+
+要求:
+1. 突出最强信号（哪个维度分最高/最低）
+2. 提示一个潜在风险点（哪个维度分较低）
+3. 给出"中短线/短线"判断
+4. 不要重复数据，用结论性语言"""
+
+    try:
+        resp = _requests.post(
+            f"{LLM_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+            json={
+                "model": "glm-4-flash",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 200,
+            },
+            timeout=15,
+        )
+        return resp.json()["choices"][0]["message"].get("content", "").strip()
+    except Exception:
+        return ""

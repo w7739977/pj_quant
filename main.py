@@ -15,7 +15,9 @@ A股量化交易系统 - 主入口
   python main.py portfolio --cash AMOUNT                      # 修改可用资金
   python main.py portfolio --reset                             # 重置为初始状态
   python main.py deploy [--push] [--simulate]  # 统一部署（生成今日操作清单）
-  python main.py live [--push] [--simulate]    # 激进实盘（100%个股，3只集中持仓）
+  python main.py live [--push] [--simulate]                    # 激进实盘（日频选股）
+  python main.py live --consensus [--push] [--simulate]        # 共识选股（D 方案，建议周一）
+  python main.py live --monitor-only [--push] [--simulate]     # 仅监控持仓（建议周二~周五）
   python main.py evolve [--push]    # 自动进化（训练+对比+替换+报告）
   python main.py evolve-history     # 查看进化记录
   python main.py performance [--push]  # 信号绩效追踪报告
@@ -346,14 +348,19 @@ def main():
         if "--limit" in sys.argv:
             idx = sys.argv.index("--limit")
             _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
-        if "--tushare" in sys.argv:
-            from data.tushare_daily import run as tushare_daily_run
-            _incremental = "--incremental" in sys.argv
-            tushare_daily_run(limit=_limit, incremental=_incremental)
-        else:
-            from data.bulk_fetcher import bulk_fetch
-            _refresh = "--refresh" in sys.argv
-            bulk_fetch(limit=_limit, refresh=_refresh)
+        from data.tushare_daily import run as tushare_daily_run
+        _incremental = "--incremental" in sys.argv
+        tushare_daily_run(limit=_limit, incremental=_incremental)
+    elif command == "fetch-industry":
+        from data.tushare_industry import run
+        run()
+    elif command == "fetch-financial":
+        from data.financial_indicator import batch_fetch_all
+        _limit = 0
+        if "--limit" in sys.argv:
+            idx = sys.argv.index("--limit")
+            _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
+        batch_fetch_all(limit=_limit)
     elif command == "portfolio":
         run_portfolio()
     elif command == "deploy":
@@ -365,7 +372,10 @@ def main():
         from portfolio.allocator import run_live_deploy
         push = "--push" in sys.argv
         simulate = "--simulate" in sys.argv
-        run_live_deploy(push=push, simulate=simulate)
+        consensus = "--consensus" in sys.argv
+        monitor_only = "--monitor-only" in sys.argv
+        run_live_deploy(push=push, simulate=simulate,
+                        consensus=consensus, monitor_only=monitor_only)
     elif command == "evolve":
         from ml.auto_evolve import evolve
         push = "--push" in sys.argv

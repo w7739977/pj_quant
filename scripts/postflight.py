@@ -42,7 +42,7 @@ def run():
 
     # ============ Step 1: 读取当前持仓 ============
     from portfolio.tracker import PortfolioTracker
-    from config.settings import INITIAL_CAPITAL, NUM_POSITIONS, MIN_BUY_CAPITAL
+    from config.settings import INITIAL_CAPITAL, NUM_POSITIONS
 
     tracker = PortfolioTracker()
     holdings_snapshot = {}
@@ -103,7 +103,7 @@ def run():
         current_holdings = len(tracker.holdings)
         slots = max(0, NUM_POSITIONS - current_holdings)
 
-        if slots > 0 and available_cash >= MIN_BUY_CAPITAL:
+        if slots > 0 and available_cash >= 5000:
             exclude_codes = list(tracker.holdings.keys())
             picks = get_stock_picks_live(
                 stock_capital=available_cash,

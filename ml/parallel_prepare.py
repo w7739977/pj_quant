@@ -91,7 +91,7 @@ def prepare_chunk(chunk_id: int):
                 factors["pb"] = last_row.get("pb", np.nan)
                 factors["turnover_rate"] = last_row.get("turnover_rate", np.nan)
                 factors["volume_ratio"] = last_row.get("volume_ratio", np.nan)
-                factors["sentiment_score"] = np.nan
+                # sentiment_score 已从 FEATURE_COLS 移除，不再写入
 
                 records.append(factors)
         except Exception as e:
