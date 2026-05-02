@@ -60,6 +60,11 @@ class SmallCapStrategy(BaseStrategy):
             "pb": -1,             # PB：低估值好
             "volume_ratio": 1,    # 量比：活跃好
             "sentiment_score": 1,  # 情绪：正面新闻多好
+            # P0 财务因子方向
+            "roe_yearly": 1,        # ROE 越高越好
+            "or_yoy": 1,            # 营收增速越高越好
+            "dt_eps_yoy": 1,        # EPS 增速越高越好
+            "debt_to_assets": -1,   # 负债率越低越好
         }
 
         scores = pd.Series(0.0, index=df.index)
@@ -82,6 +87,10 @@ class SmallCapStrategy(BaseStrategy):
             # 权重: 中性化后已等量级，仅情绪因子噪声大需降权
             if "sentiment" in factor_name:
                 weight = 0.5
+            elif factor_name in ("roe_yearly", "or_yoy", "dt_eps_yoy"):
+                weight = 1.5  # 财务核心因子，给中等权重
+            elif factor_name == "debt_to_assets":
+                weight = 1.0
             else:
                 weight = 1.0
 

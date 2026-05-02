@@ -359,6 +359,13 @@ def main():
     elif command == "fetch-industry":
         from data.tushare_industry import run
         run()
+    elif command == "fetch-financial":
+        from data.financial_indicator import batch_fetch_all
+        _limit = 0
+        if "--limit" in sys.argv:
+            idx = sys.argv.index("--limit")
+            _limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 100
+        batch_fetch_all(limit=_limit)
     elif command == "portfolio":
         run_portfolio()
     elif command == "deploy":

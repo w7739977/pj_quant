@@ -33,6 +33,11 @@ FEATURE_COLS = [
     "ma5_bias", "ma10_bias", "ma20_bias", "rsi_14",
     "pe_ttm", "pb", "turnover_rate", "volume_ratio",
     "sentiment_score",
+    # P0 财务因子 (PIT)
+    "roe_yearly",
+    "or_yoy",
+    "dt_eps_yoy",
+    "debt_to_assets",
 ]
 
 # 特征重要性保存路径
@@ -75,6 +80,14 @@ def prepare_training_data(
     total = len(symbols)
     records = []
 
+    # 初始化财务 PIT 缓存（全局加载一次）
+    global _FIN_CACHE
+    if "_FIN_CACHE" not in globals():
+        from data.financial_indicator import load_all_pit_to_dict
+        logger.info("加载 financial_indicator 到内存缓存...")
+        _FIN_CACHE = load_all_pit_to_dict()
+        logger.info(f"  财务缓存: {len(_FIN_CACHE)} 只股票 PIT 记录")
+
     for i, sym in enumerate(symbols):
         try:
             df = load_stock_daily(sym)
@@ -105,6 +118,13 @@ def prepare_training_data(
                 factors["pb"] = last_row.get("pb", np.nan)
                 factors["turnover_rate"] = last_row.get("turnover_rate", np.nan)
                 factors["volume_ratio"] = last_row.get("volume_ratio", np.nan)
+
+                # 财务因子: PIT 查询（按公告日，避免未来数据泄露）
+                fin_factors = _lookup_financial_pit(sym, end_date.replace("-", ""))
+                factors["roe_yearly"] = fin_factors.get("roe_yearly", np.nan)
+                factors["or_yoy"] = fin_factors.get("or_yoy", np.nan)
+                factors["dt_eps_yoy"] = fin_factors.get("dt_eps_yoy", np.nan)
+                factors["debt_to_assets"] = fin_factors.get("debt_to_assets", np.nan)
 
                 # 情绪因子: 从 sentiment_history 查询历史值，无则 NaN
                 factors["sentiment_score"] = _lookup_historical_sentiment(sym, end_date)
@@ -163,6 +183,22 @@ def _lookup_historical_sentiment(code: str, date: str) -> float:
         _SENT_CACHE = load_all_to_dict()
         logger.info(f"情绪缓存: {len(_SENT_CACHE)} 条记录")
     return _SENT_CACHE.get((date, code), float("nan"))
+
+
+def _lookup_financial_pit(code: str, as_of_yyyymmdd: str) -> dict:
+    """O(log n) PIT 查询（每股 ~60 条历史，二分查找）"""
+    global _FIN_CACHE
+    if "_FIN_CACHE" not in globals():
+        return {}
+    history = _FIN_CACHE.get(code, [])
+    if not history:
+        return {}
+    import bisect
+    ann_dates = [h[0] for h in history]
+    idx = bisect.bisect_right(ann_dates, as_of_yyyymmdd) - 1
+    if idx < 0:
+        return {}
+    return history[idx][1]
 
 
 def train_model(train_df: pd.DataFrame) -> dict:

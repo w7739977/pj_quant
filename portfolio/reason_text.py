@@ -52,6 +52,46 @@ def humanize_reason(reason_data: dict, name: str = "",
     if header_parts:
         parts.append("、".join(header_parts))
 
+    # ---- 财务因子关键指标 ----
+    kf = reason_data.get("key_factors") or {}
+
+    roe = kf.get("roe_yearly")
+    if roe is not None:
+        try:
+            v = float(roe)
+            if v > 15:
+                parts.append(f"高 ROE({v:.0f}%)")
+            elif v > 8:
+                parts.append(f"ROE 良好({v:.0f}%)")
+            elif v < 0:
+                parts.append(f"亏损 ROE({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
+    or_yoy = kf.get("or_yoy")
+    if or_yoy is not None:
+        try:
+            v = float(or_yoy)
+            if v > 30:
+                parts.append(f"营收高增({v:.0f}%)")
+            elif v > 10:
+                parts.append(f"营收增长({v:.0f}%)")
+            elif v < -10:
+                parts.append(f"营收下滑({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
+    debt = kf.get("debt_to_assets")
+    if debt is not None:
+        try:
+            v = float(debt)
+            if v > 80:
+                parts.append(f"高负债({v:.0f}%)")
+            elif v < 30:
+                parts.append(f"低负债({v:.0f}%)")
+        except (ValueError, TypeError):
+            pass
+
     # ---- 维度得分（三维度分行展示） ----
     dim_scores = reason_data.get("dimension_scores")
     dim_details = reason_data.get("dimension_details")

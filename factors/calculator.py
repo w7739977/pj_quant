@@ -191,6 +191,20 @@ def compute_all_factors(symbol: str, end_date: str = None, lookback: int = 120) 
     for col in ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]:
         factors[col] = last_row.get(col, np.nan)
 
+    # 财务因子 (PIT 查询，按公告日避免未来数据泄露)
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    try:
+        from data.financial_indicator import get_latest_pit
+        fin = get_latest_pit(symbol, end_date)
+        factors["roe_yearly"] = fin.get("roe_yearly", np.nan)
+        factors["or_yoy"] = fin.get("or_yoy", np.nan)
+        factors["dt_eps_yoy"] = fin.get("dt_eps_yoy", np.nan)
+        factors["debt_to_assets"] = fin.get("debt_to_assets", np.nan)
+    except Exception:
+        for col in ["roe_yearly", "or_yoy", "dt_eps_yoy", "debt_to_assets"]:
+            factors[col] = np.nan
+
     return factors
 
 

@@ -46,18 +46,44 @@ def test_neutralize_pipeline():
     assert (out["mom_20d"].between(0, 1) | out["mom_20d"].isna()).all()
 
 
-def test_per_section_neutralize_isolates_dates():
-    """同一只股票不同截面应该独立中性化"""
+def test_per_section_neutralize_isolates_dates_zscore():
+    """同一只股票不同截面应该独立 zscore（默认无行业排名）
+
+    每截面 10 只股票（满足 cross_sectional_zscore 最小样本阈值）
+    时序漂移应被截面隔离消除（每截面均值≈0）
+    """
+    rows = []
+    for date_idx, date in enumerate(["2024-01-01", "2024-02-01", "2024-03-01"]):
+        for i in range(10):
+            rows.append({
+                "code": f"s{i:02d}",
+                "industry": "X",
+                "end_date": date,
+                # 时序漂移: 第 1 截面 ~10, 第 2 截面 ~100, 第 3 截面 ~1000
+                "mom_20d": (10 ** (date_idx + 1)) + i * (10 ** date_idx),
+            })
+    df = pd.DataFrame(rows)
+    out = neutralize_factors_per_section(df, ["mom_20d"])
+    # 每截面均值应≈0（zscore 中心化）
+    for date in df["end_date"].unique():
+        sub = out[out["end_date"] == date]["mom_20d"]
+        assert abs(sub.mean()) < 1e-6, f"截面 {date} mean={sub.mean()}"
+        # std 接近 1
+        assert abs(sub.std(ddof=1) - 1.0) < 0.1
+
+
+def test_per_section_neutralize_with_industry():
+    """显式开启 apply_industry=True 时使用行业内排名"""
     df = pd.DataFrame({
         "code": ["a", "b", "a", "b", "a", "b"],
         "industry": ["X", "X", "X", "X", "X", "X"],
         "end_date": ["2024-01-01", "2024-01-01",
                      "2024-02-01", "2024-02-01",
                      "2024-03-01", "2024-03-01"],
-        "mom_20d": [10, 20, 100, 200, 1000, 2000],  # 时序漂移
+        "mom_20d": [10, 20, 100, 200, 1000, 2000],
     })
-    out = neutralize_factors_per_section(df, ["mom_20d"])
-    # 每个截面只有 2 只股票（同行业），中性化后应为 0.5/1.0
+    out = neutralize_factors_per_section(df, ["mom_20d"], apply_industry=True)
+    # 行业内排名：每截面 2 只 → 0.5 / 1.0
     for date in df["end_date"].unique():
         sub = out[out["end_date"] == date]["mom_20d"]
         assert sub.min() == 0.5
