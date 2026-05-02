@@ -95,15 +95,32 @@ crontab -e   # 见下方
 ## 三、定时任务（生产 crontab）
 
 ```cron
-# 周一 08:30 盘前 — D 方案共识选股推送（picks 给用户开盘前看）
-30 8 * * 1   /opt/pj_quant/run_weekly.sh >> /opt/pj_quant/logs/cron.log 2>&1
+# Mon-Fri 08:30 盘前 — D 方案共识 picks 推送
+# 脚本内部自动判断「本周第一个交易日才跑」，节假日自动顺延
+30 8 * * 1-5 /opt/pj_quant/run_weekly.sh >> /opt/pj_quant/logs/cron.log 2>&1
 
-# Mon-Fri 15:15 — 收盘后维护（持仓监控 + 缓存今日 scored）
+# Mon-Fri 15:15 收盘后 — 持仓监控 + 缓存今日 scored
+# 脚本内部自动判断交易日，节假日跳过
 15 15 * * 1-5 /opt/pj_quant/run_daily.sh >> /opt/pj_quant/logs/cron.log 2>&1
 
 # 每月 1 号 16:00 — 自动 evolve 训练
 0 16 1 * *  cd /opt/pj_quant && python3 main.py evolve --push >> logs/evolve.log 2>&1
 ```
+
+### 交易日 / 节假日处理
+
+`run_weekly.sh` 在脚本入口判断**本周第一个交易日**：
+
+| 场景 | 周一 | 周二 | 周三 | 周四 | 周五 |
+|---|---|---|---|---|---|
+| 正常周 | ✅ 跑 | skip | skip | skip | skip |
+| 周一假日（劳动节）| skip | ✅ 跑 | skip | skip | skip |
+| 周一二都假（春节后）| skip | skip | ✅ 跑 | skip | skip |
+| 全周长假（春节内）| skip | skip | skip | skip | skip |
+
+`run_daily.sh` 在脚本入口判断**今天是否交易日**：节假日（含春节连休、劳动节、国庆等）自动跳过。
+
+依赖 `chinese_calendar` PyPI 包识别中国法定节假日（含调休补班）。
 
 ### 数据流时间线
 

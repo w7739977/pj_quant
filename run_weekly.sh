@@ -1,17 +1,21 @@
 #!/bin/bash
 # =============================================================
-# 周一盘前 D 方案共识选股推送（08:30）
+# D 方案盘前共识选股推送（每周第一个交易日 08:30）
+#
+# crontab 触发: Mon-Fri 都跑，但脚本内自动判断「是否本周第一个交易日」，
+# 不是则跳过。这样能正确处理:
+#   - 周一交易日 → 周一跑
+#   - 周一节假日 → 顺延周二跑
+#   - 周一二都假（春节后）→ 顺延到周三跑
 #
 # 流程:
+#   - 交易日守卫（本周第一个交易日才跑）
 #   - preflight 健康检查
-#   - 共识选股（读上周 Mon-Fri cache → 频次共识 → top 10）
-#   - 推送微信
+#   - 共识缓存充足检查 + 不足时自动 backfill
+#   - 共识选股 + 推送微信
 #
-# crontab:
-#   30 8 * * 1 /path/to/pj_quant/run_weekly.sh >> /path/to/pj_quant/logs/cron.log 2>&1
-#
-# 配套要求:
-#   run_daily.sh 必须每天 15:15 跑（Mon-Fri），保证 cache 持续累积
+# crontab 配置:
+#   30 8 * * 1-5 /path/to/pj_quant/run_weekly.sh >> /path/to/pj_quant/logs/cron.log 2>&1
 # =============================================================
 
 set -e
@@ -24,7 +28,15 @@ mkdir -p "$LOG_DIR"
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/weekly_${DATE}.log"
 
-echo "========== $DATE 周一盘前共识选股 ==========" | tee -a "$LOG_FILE"
+echo "========== $DATE 盘前共识选股触发 ==========" | tee -a "$LOG_FILE"
+
+# 阶段零：交易日守卫
+echo "[$(date +%H:%M:%S)] 交易日检查..." | tee -a "$LOG_FILE"
+if ! python3 scripts/is_trading_day_check.py is_first_of_week 2>>"$LOG_FILE"; then
+    echo "[$(date +%H:%M:%S)] 今天不是本周第一个交易日，跳过推送" | tee -a "$LOG_FILE"
+    exit 0
+fi
+echo "[$(date +%H:%M:%S)] ✓ 今天是本周第一个交易日，继续" | tee -a "$LOG_FILE"
 
 # 阶段一：preflight
 echo "[$(date +%H:%M:%S)] preflight 检查..." | tee -a "$LOG_FILE"

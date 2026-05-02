@@ -31,6 +31,14 @@ WEEKDAY=$(date +%u)  # 1=Mon ... 7=Sun
 
 echo "========== $DATE 日常执行 (周${WEEKDAY}) ==========" | tee -a "$LOG_FILE"
 
+# 阶段 -1：交易日守卫（节假日跳过，避免污染 cache）
+echo "[$(date +%H:%M:%S)] 交易日检查..." | tee -a "$LOG_FILE"
+if ! python3 scripts/is_trading_day_check.py is_trading 2>>"$LOG_FILE"; then
+    echo "[$(date +%H:%M:%S)] 今天非交易日（节假日/补班例外），跳过" | tee -a "$LOG_FILE"
+    exit 0
+fi
+echo "[$(date +%H:%M:%S)] ✓ 交易日，继续" | tee -a "$LOG_FILE"
+
 # 阶段零：增量数据拉取（preflight 之前，保证数据新鲜）
 echo "[$(date +%H:%M:%S)] 增量数据拉取..." | tee -a "$LOG_FILE"
 if python3 main.py fetch-all --incremental 2>&1 | tee -a "$LOG_FILE"; then
