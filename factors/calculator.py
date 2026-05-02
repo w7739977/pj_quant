@@ -249,7 +249,7 @@ def _batch_sentiment_factors(factor_df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_stock_pool_factors(
     min_cap: float = 5e8,
-    max_cap: float = 1e13,
+    max_cap: float = 5e9,
     end_date: str = None,
     skip_sentiment: bool = False,
 ) -> pd.DataFrame:
@@ -384,19 +384,29 @@ def neutralize_factors(df: pd.DataFrame, factor_cols: list,
 
 def neutralize_factors_per_section(df: pd.DataFrame, factor_cols: list,
                                     section_col: str = "end_date",
-                                    industry_col: str = "industry") -> pd.DataFrame:
+                                    industry_col: str = "industry",
+                                    apply_industry: bool = False) -> pd.DataFrame:
     """
     按截面分组做中性化（Qlib CSZScoreNorm 标准做法）
 
-    每个 section_col 唯一值（即一个交易日）单独执行：
-      winsorize → cross_sectional_zscore → industry_neutralize
+    每个 section_col 唯一值（即一个截面）单独执行：
+      winsorize → cross_sectional_zscore [→ industry_neutralize]
+
+    apply_industry=False (默认):
+      仅做 winsorize + zscore，与 Qlib CSZScoreNorm 一致
+      保留因子绝对量级，不依赖行业内样本数
+
+    apply_industry=True:
+      额外做行业内排名（华泰金工/信达加强方案）
+      要求每个行业内有足够样本数（≥10），否则 rank(pct) 退化失真
 
     Parameters
     ----------
     df : 含 section_col 字段的训练样本
     factor_cols : 待中性化的因子列
     section_col : 截面分组列（默认 "end_date"）
-    industry_col : 行业列（默认 "industry"）
+    industry_col : 行业列（默认 "industry"，仅 apply_industry=True 时用）
+    apply_industry : 是否额外做行业内排名（默认 False）
 
     Returns
     -------
@@ -420,10 +430,12 @@ def neutralize_factors_per_section(df: pd.DataFrame, factor_cols: list,
     for section in sections:
         mask = df[section_col] == section
         sub = df.loc[mask].copy()
-        # 在该截面内做 winsorize + zscore + industry_rank
+        # 在该截面内做 winsorize + zscore
         sub = winsorize_cross_section(sub, factor_cols)
         sub = cross_sectional_zscore(sub, factor_cols)
-        sub = industry_neutralize(sub, factor_cols, industry_col)
+        # 可选: 行业内排名（要求每行业 ≥10 只样本，否则退化失真）
+        if apply_industry:
+            sub = industry_neutralize(sub, factor_cols, industry_col)
         # 写回原 df
         df.loc[mask, factor_cols] = sub[factor_cols].values
 

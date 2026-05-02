@@ -122,28 +122,33 @@ def prepare_training_data(
     if train_df.empty:
         return train_df
 
-    # === 因子预处理: 按截面分组中性化 ===
-    from factors.calculator import neutralize_factors_per_section
-    from data.tushare_industry import get_industry_for_codes
+    # === 因子预处理（可选，环境变量 ENABLE_NEUTRALIZE=1 启用）===
+    # 实测中性化在小盘策略下反而降低 R²（信号失真），暂时禁用
+    # 待因子库扩展到 50+ 后再评估开启
+    import os
+    if os.getenv("ENABLE_NEUTRALIZE") == "1":
+        from factors.calculator import neutralize_factors_per_section
+        from data.tushare_industry import get_industry_for_codes
 
-    # 注入行业字段
-    industry_map = get_industry_for_codes(train_df["code"].tolist())
-    train_df["industry"] = train_df["code"].map(industry_map).fillna("未知")
+        industry_map = get_industry_for_codes(train_df["code"].tolist())
+        train_df["industry"] = train_df["code"].map(industry_map).fillna("未知")
 
-    # 因子列（不含 label/code/industry/end_date）
-    factor_cols = [c for c in train_df.columns
-                   if c not in ("label", "code", "industry", "end_date")]
+        factor_cols = [c for c in train_df.columns
+                       if c not in ("label", "code", "industry", "end_date")]
 
-    train_df = neutralize_factors_per_section(train_df, factor_cols,
-                                               section_col="end_date",
-                                               industry_col="industry")
-    logger.info(f"  因子中性化完成 (按 {train_df['end_date'].nunique()} 个截面分组)")
+        train_df = neutralize_factors_per_section(train_df, factor_cols,
+                                                   section_col="end_date",
+                                                   industry_col="industry")
+        logger.info(f"  因子中性化完成 (按 {train_df['end_date'].nunique()} 个截面分组)")
+    else:
+        logger.info(f"  因子中性化已禁用 (set ENABLE_NEUTRALIZE=1 启用)")
 
     # 打印基本面因子使用率
     fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]
     for col in fund_cols:
-        non_null = train_df[col].notna().sum()
-        logger.info(f"    {col}: {non_null}/{len(train_df)} ({non_null*100/len(train_df):.1f}%) 有数据")
+        if col in train_df.columns:
+            non_null = train_df[col].notna().sum()
+            logger.info(f"    {col}: {non_null}/{len(train_df)} ({non_null*100/len(train_df):.1f}%) 有数据")
 
     return train_df
 
