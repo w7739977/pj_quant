@@ -89,9 +89,10 @@ def prepare_training_data(
                     continue
 
                 forward_return = float(fwd.iloc[-1]["close"]) / float(fwd.iloc[0]["close"]) - 1.0
+                end_date = str(window.iloc[-1]["date"])[:10]  # 截面日期
 
                 # 计算该截面的技术因子
-                factors = {"code": sym, "label": forward_return}
+                factors = {"code": sym, "label": forward_return, "end_date": end_date}
                 factors.update(calc_momentum(window))
                 factors.update(calc_volatility(window))
                 factors.update(calc_turnover_factor(window))
@@ -121,20 +122,22 @@ def prepare_training_data(
     if train_df.empty:
         return train_df
 
-    # === 因子预处理: winsorize + zscore + industry neutralize ===
-    from factors.calculator import neutralize_factors
+    # === 因子预处理: 按截面分组中性化 ===
+    from factors.calculator import neutralize_factors_per_section
     from data.tushare_industry import get_industry_for_codes
 
     # 注入行业字段
     industry_map = get_industry_for_codes(train_df["code"].tolist())
     train_df["industry"] = train_df["code"].map(industry_map).fillna("未知")
 
-    # 因子列（不含 label/code/industry）
+    # 因子列（不含 label/code/industry/end_date）
     factor_cols = [c for c in train_df.columns
-                   if c not in ("label", "code", "industry")]
+                   if c not in ("label", "code", "industry", "end_date")]
 
-    train_df = neutralize_factors(train_df, factor_cols)
-    logger.info(f"  因子中性化完成 (winsorize + zscore + industry neutralize)")
+    train_df = neutralize_factors_per_section(train_df, factor_cols,
+                                               section_col="end_date",
+                                               industry_col="industry")
+    logger.info(f"  因子中性化完成 (按 {train_df['end_date'].nunique()} 个截面分组)")
 
     # 打印基本面因子使用率
     fund_cols = ["pe_ttm", "pb", "turnover_rate", "volume_ratio"]

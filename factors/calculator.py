@@ -403,3 +403,51 @@ def neutralize_factors(df: pd.DataFrame, factor_cols: list,
     df = cross_sectional_zscore(df, factor_cols)
     df = industry_neutralize(df, factor_cols, industry_col)
     return df
+
+
+def neutralize_factors_per_section(df: pd.DataFrame, factor_cols: list,
+                                    section_col: str = "end_date",
+                                    industry_col: str = "industry") -> pd.DataFrame:
+    """
+    按截面分组做中性化（Qlib CSZScoreNorm 标准做法）
+
+    每个 section_col 唯一值（即一个交易日）单独执行：
+      winsorize → cross_sectional_zscore → industry_neutralize
+
+    Parameters
+    ----------
+    df : 含 section_col 字段的训练样本
+    factor_cols : 待中性化的因子列
+    section_col : 截面分组列（默认 "end_date"）
+    industry_col : 行业列（默认 "industry"）
+
+    Returns
+    -------
+    DataFrame: 同 shape，但因子列已被按截面中性化
+    """
+    if section_col not in df.columns:
+        # 退化为一次性中性化（向后兼容，但应避免使用）
+        logger.warning(
+            f"无 {section_col} 列，退化为全局中性化（不推荐）"
+        )
+        return neutralize_factors(df, factor_cols, industry_col)
+
+    df = df.copy()
+    # 预转 float 避免 int→float 赋值 FutureWarning
+    for col in factor_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+    sections = df[section_col].unique()
+
+    # 按截面循环，每个截面独立做完整流程
+    for section in sections:
+        mask = df[section_col] == section
+        sub = df.loc[mask].copy()
+        # 在该截面内做 winsorize + zscore + industry_rank
+        sub = winsorize_cross_section(sub, factor_cols)
+        sub = cross_sectional_zscore(sub, factor_cols)
+        sub = industry_neutralize(sub, factor_cols, industry_col)
+        # 写回原 df
+        df.loc[mask, factor_cols] = sub[factor_cols].values
+
+    return df
