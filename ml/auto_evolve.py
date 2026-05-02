@@ -63,9 +63,12 @@ def evolve(push: bool = False) -> dict:
         "version_count": old_info.get("version_count", 0),
     }
 
-    # === Step 2: 计算因子（含情绪） ===
-    print("\n[2/4] 计算因子（含情绪）...")
-    factor_df = compute_stock_pool_factors(skip_sentiment=False)
+    # === Step 2: 计算因子（跳过情绪 — 历史无新闻数据，对模型贡献 0%）===
+    # 实测情绪因子 feature_importance=0.0，训练时全 NaN 起不到作用。
+    # 8 维度推送展示仍调实时情绪 API（仅 top 10 推荐，不限流）。
+    # 待 sentiment_history 数据库建好后再开启训练阶段情绪因子。
+    print("\n[2/4] 计算因子（跳过情绪，加速 6x）...")
+    factor_df = compute_stock_pool_factors(skip_sentiment=True)
 
     if factor_df.empty:
         report["decision"] = "ABORT: 因子计算失败 / 股票池为空"
@@ -73,11 +76,9 @@ def evolve(push: bool = False) -> dict:
         return _finish_report(report, push)
 
     pool_size = len(factor_df)
-    has_sent = int((factor_df.get("sentiment_score", 0).fillna(0) != 0).sum())
     print(f"  股票池: {pool_size} 只")
-    print(f"  情绪覆盖: {has_sent}/{pool_size}")
     report["steps"]["stock_pool"] = {"count": pool_size}
-    report["steps"]["factors"] = {"sentiment_coverage": f"{has_sent}/{pool_size}"}
+    report["steps"]["factors"] = {"sentiment_coverage": "skipped (importance=0)"}
 
     if pool_size < 20:
         report["decision"] = f"ABORT: 股票池不足 20 只 ({pool_size})"
