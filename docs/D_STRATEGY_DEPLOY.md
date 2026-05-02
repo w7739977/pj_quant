@@ -4,6 +4,29 @@
 
 ---
 
+## 🚀 一键部署（推荐）
+
+```bash
+bash scripts/deploy.sh                    # 全量（拉代码 + 数据 + 财务 + 校验 + 训练 + 缓存 + 冒烟 + 回测，~1.5 小时）
+bash scripts/deploy.sh --quick            # 快速（仅代码 + 模型 + 缓存 + 冒烟，~10 分钟）
+bash scripts/deploy.sh --skip-financial   # 跳过财务（财报是季度数据，每月跑一次即可）
+bash scripts/deploy.sh --no-pull          # 已 git pull 过的情况
+bash scripts/deploy.sh --only-model       # 只重训模型 + 回填缓存
+bash scripts/deploy.sh --only-verify      # 只跑冒烟 + 回测
+```
+
+完整流程包含 8 步：
+1. 拉新代码
+2. 增量数据（行情 + daily_basic）
+3. 财务因子 PIT
+4. 数据质检（11 项）
+5. 训练 / 上线模型（evolve）
+6. 回填共识缓存
+7. 端到端冒烟
+8. 今年以来回测（D 方案 vs 日频 4 套对比）
+
+---
+
 ## 一、最小部署清单
 
 ### 1.1 代码 + 数据
