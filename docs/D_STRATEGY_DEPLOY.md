@@ -103,9 +103,26 @@ crontab -e   # 见下方
 # 脚本内部自动判断交易日，节假日跳过
 15 15 * * 1-5 /opt/pj_quant/run_daily.sh >> /opt/pj_quant/logs/cron.log 2>&1
 
-# 每月 1 号 16:00 — 自动 evolve 训练
+# 每月 1 号 16:00 — 自动 evolve 训练 + 4 周回测验证 + 上线
+# 不受交易日影响（即使 1 号是劳动节/国庆，也跑——它只训练上线，不交易）
 0 16 1 * *  cd /opt/pj_quant && python3 main.py evolve --push >> logs/evolve.log 2>&1
 ```
+
+### evolve 流程（5 步）
+
+evolve 训练完会自动跑最近 4 周回测验证：
+
+| Step | 内容 | 说明 |
+|---|---|---|
+| 1 | 取旧模型 R² 基准 | |
+| 2 | 计算因子 | 跳过情绪因子 |
+| 3 | 准备训练数据 | 滚动截面 + winsorize |
+| 4 | 训练新模型 + 上线决策 | 基于 CV R² |
+| 5 | **回测验证（最近 4 周 D 方案）** | informational，不影响 step 4 决策 |
+
+回测产出: `avg_alpha` / 累计 / 跑赢基准率 → 推送到微信报告 + 写入 `logs/evolve/evolve_*.json`。
+
+如果新模型 R² 上升但回测 alpha 下降 → log warning + 推送告警，需要人工 review。
 
 ### 交易日 / 节假日处理
 

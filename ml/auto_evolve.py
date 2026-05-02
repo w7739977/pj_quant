@@ -101,7 +101,7 @@ def evolve(push: bool = False) -> dict:
     report["steps"]["factors"]["train_samples"] = len(train_df)
 
     # === Step 4: 训练新模型（自动版本管理） ===
-    print("\n[4/4] 训练新模型...")
+    print("\n[4/5] 训练新模型...")
     result = train_model(train_df)
 
     if not result:
@@ -136,6 +136,11 @@ def evolve(push: bool = False) -> dict:
         report["decision"] = f"⚠ 保留旧模型 (新 R²={new_r2} < 旧 {old_r2})"
         print(f"  → 新模型 R²={new_r2:.4f} < 旧模型 R²={old_r2}，保留旧模型")
 
+    # === Step 5: 回测验证（informational，不影响上线决策）===
+    backtest_summary = _run_post_evolve_backtest(weeks=4)
+    if backtest_summary:
+        report["steps"]["backtest_4w"] = backtest_summary
+
     # 保存进化日志
     _save_evolve_log(report)
 
@@ -144,6 +149,66 @@ def evolve(push: bool = False) -> dict:
         _push_report(report)
 
     return report
+
+
+def _run_post_evolve_backtest(weeks: int = 4) -> dict:
+    """训练后跑短期回测验证（用当前生产模型，可能是新上线的或保留的旧模型）
+
+    informational only — 不影响 train_model 的上线决策。
+    给运维一个"模型在最近实际行情上是否还能跑"的健康度指标。
+
+    Returns
+    -------
+    dict 或 None: {d_alpha, d_累计, d_n, beat_bench_rate}
+    """
+    print("\n[5/5] 回测验证（最近 4 周，informational）...")
+    try:
+        import subprocess
+        from datetime import datetime, timedelta
+        end = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+        start = (datetime.now() - timedelta(weeks=weeks + 1)).strftime('%Y-%m-%d')
+        out_csv = f"logs/backtest_post_evolve.csv"
+        result = subprocess.run(
+            ['python3', 'scripts/backtest_year.py',
+             '--start', start, '--end', end, '--out', out_csv],
+            capture_output=True, text=True, timeout=900,
+        )
+        if result.returncode != 0:
+            logger.warning(f"回测失败: {result.stderr[:300]}")
+            return None
+        # 解析 D 方案 alpha
+        try:
+            import pandas as pd
+            df = pd.read_csv(out_csv)
+            d = df[df["method"] == "D 频次共识(生产)"]
+            if d.empty:
+                logger.warning("回测无 D 方案观测点，可能数据不足")
+                return None
+            avg_alpha = float(d["alpha"].mean())
+            cum_alpha = float((1 + d["alpha"]).prod() - 1)
+            beat = float((d["alpha"] > 0).mean())
+            n = len(d)
+            print(f"  D 方案 {n} 周: avg_alpha={avg_alpha*100:+.2f}% "
+                  f"累计={cum_alpha*100:+.2f}% 跑赢基准率={beat*100:.0f}%")
+            if avg_alpha < -0.005:
+                logger.warning(f"⚠️ D 方案最近 {n} 周 avg_alpha {avg_alpha*100:+.2f}% 偏低，"
+                               f"建议人工 review")
+            return {
+                "weeks": weeks,
+                "n_obs": n,
+                "d_avg_alpha": round(avg_alpha, 4),
+                "d_cum_alpha": round(cum_alpha, 4),
+                "beat_bench_rate": round(beat, 4),
+            }
+        except Exception as e:
+            logger.warning(f"解析回测结果失败: {e}")
+            return None
+    except subprocess.TimeoutExpired:
+        logger.warning("回测超时（>15 分钟）")
+        return None
+    except Exception as e:
+        logger.warning(f"回测异常: {e}")
+        return None
 
 
 def _finish_report(report: dict, push: bool) -> dict:
@@ -204,10 +269,23 @@ def _push_report(report: dict):
 - 训练样本: {factors.get('train_samples', 'N/A')} 条
 
 Top 5 因子:
-{chr(10).join(f'  {i+1}. {f}: {v:.4f}' for i, (f, v) in enumerate(factors.get('top5', [])))}"""
+{chr(10).join(f'  {i+1}. {f}: {v:.4f}' for i, (f, v) in enumerate(factors.get('top5', [])))}
+
+回测验证（最近 4 周 D 方案）:
+{_format_backtest_summary(steps.get('backtest_4w'))}"""
 
     send_to_all(title, msg)
     print("进化报告已推送到微信")
+
+
+def _format_backtest_summary(b: dict) -> str:
+    """格式化回测验证摘要"""
+    if not b:
+        return "  (回测失败或样本不足，跳过)"
+    return (f"  观测 {b.get('n_obs', 0)} 周  "
+            f"avg_alpha={b.get('d_avg_alpha', 0)*100:+.2f}%  "
+            f"累计={b.get('d_cum_alpha', 0)*100:+.2f}%  "
+            f"跑赢基准={b.get('beat_bench_rate', 0)*100:.0f}%")
 
 
 def get_evolve_history(limit: int = 5) -> list:
