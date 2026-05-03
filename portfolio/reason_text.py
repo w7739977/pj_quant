@@ -472,17 +472,10 @@ def _legacy_humanize(reason: str, name: str = "") -> str:
 
 
 def ai_eight_dimensions_summary(reason_data: dict, name: str = "") -> str:
-    """
-    GLM-4-flash 综合 8 维度 + ML/因子 → 一句话推荐总结
-    """
-    try:
-        from config.settings import LLM_API_KEY, LLM_BASE_URL
-        import requests as _requests
-    except ImportError:
-        return ""
-    if not LLM_API_KEY:
-        return ""
+    """LLM 综合 8 维度 + ML/因子 → 一句话推荐总结（DeepSeek 主，GLM 备）
 
+    所有 LLM 都失败时返回 ""，调用方推送会跳过此行（不阻塞 picks 推送）。
+    """
     dims = reason_data.get("eight_dimensions", {})
     if not dims:
         return ""
@@ -512,18 +505,6 @@ ML预测20日收益: {pred_return*100:+.1f}%
 3. 给出"中短线/短线"判断
 4. 不要重复数据，用结论性语言"""
 
-    try:
-        resp = _requests.post(
-            f"{LLM_BASE_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-            json={
-                "model": "glm-4-flash",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 200,
-            },
-            timeout=15,
-        )
-        return resp.json()["choices"][0]["message"].get("content", "").strip()
-    except Exception:
-        return ""
+    from sentiment.llm_client import chat_simple
+    reply = chat_simple(prompt, temperature=0.3, max_tokens=200, timeout=15)
+    return reply or ""

@@ -118,41 +118,16 @@ def fetch_stock_news(symbol: str) -> list:
 
 def _call_llm(model: str, prompt: str, max_tokens: int = 300, temperature: float = 0.1,
               timeout: int = 30) -> str:
-    """调用智谱 GLM API，返回 content 文本，失败返回空字符串"""
-    try:
-        from config.settings import LLM_API_KEY, LLM_BASE_URL
-    except ImportError:
-        return ""
+    """LLM 调用（DeepSeek 主，GLM 备）
 
-    if not LLM_API_KEY:
-        return ""
-
-    try:
-        resp = requests.post(
-            f"{LLM_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {LLM_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            timeout=timeout,
-        )
-        result = resp.json()
-
-        if "error" in result:
-            logger.warning(f"GLM API 错误 ({model}): {result['error']}")
-            return ""
-
-        content = result["choices"][0]["message"].get("content", "").strip()
-        return content
-    except Exception as e:
-        logger.warning(f"GLM API 调用失败 ({model}): {e}")
-        return ""
+    model 参数保留作为"任务标识"用于日志，但实际模型由 LLM_PROVIDERS 决定。
+    历史调用点用 "glm-4-flash" / "glm-5" 区分 task — 现在统一走 deepseek-chat（足够强）
+    或失败时回 GLM。失败返回空字符串。
+    """
+    from sentiment.llm_client import chat_simple
+    reply = chat_simple(prompt, max_tokens=max_tokens,
+                        temperature=temperature, timeout=timeout)
+    return reply or ""
 
 
 def _parse_scores(content: str, expected_count: int):

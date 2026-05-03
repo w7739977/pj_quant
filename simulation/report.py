@@ -76,19 +76,11 @@ def _humanize_reason(trade: dict) -> str:
 
 def _ai_decision_summary(sells: list, buys: list, holdings: dict,
                          total_value: float, daily_ret: float) -> str:
-    """
-    调用 GLM-4-flash 生成通俗易懂的整体决策解读
-    一次调用，涵盖所有买卖和无操作的解读
-    """
-    try:
-        from config.settings import LLM_API_KEY, LLM_BASE_URL
-        import requests
-    except ImportError:
-        return ""
+    """LLM 生成通俗易懂的整体决策解读（DeepSeek 主，GLM 备）
 
-    if not LLM_API_KEY:
-        return ""
-
+    一次调用，涵盖所有买卖和无操作的解读。
+    所有 LLM 都失败时返回 ""，模拟盘日报会跳过 AI 解读段落。
+    """
     # 构建上下文
     context_parts = []
     if sells:
@@ -128,27 +120,9 @@ def _ai_decision_summary(sells: list, buys: list, holdings: dict,
 3. 不要重复数据，只说结论和逻辑
 4. 控制在80字以内"""
 
-    try:
-        resp = requests.post(
-            f"{LLM_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {LLM_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "glm-4-flash",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 200,
-            },
-            timeout=15,
-        )
-        result = resp.json()
-        content = result["choices"][0]["message"].get("content", "").strip()
-        return content
-    except Exception as e:
-        logger.warning(f"AI决策解读失败: {e}")
-        return ""
+    from sentiment.llm_client import chat_simple
+    reply = chat_simple(prompt, temperature=0.3, max_tokens=200, timeout=15)
+    return reply or ""
 
 
 def _get_holding_analysis() -> list:
@@ -308,16 +282,7 @@ def _format_sentiment(sentiment: dict, compact: bool = False) -> str:
 
 
 def _ai_holding_summary(holding_analysis: list) -> str:
-    """调用 GLM-4-flash 生成持仓整体解读"""
-    try:
-        from config.settings import LLM_API_KEY, LLM_BASE_URL
-        import requests
-    except ImportError:
-        return ""
-
-    if not LLM_API_KEY:
-        return ""
-
+    """LLM 生成持仓整体解读（DeepSeek 主，GLM 备）"""
     # 构建持仓描述
     hold_parts = []
     for h in holding_analysis:
@@ -347,26 +312,9 @@ def _ai_holding_summary(holding_analysis: list) -> str:
 3. 用大白话，不使用技术术语
 4. 控制在100字以内"""
 
-    try:
-        resp = requests.post(
-            f"{LLM_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {LLM_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "glm-4-flash",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 200,
-            },
-            timeout=15,
-        )
-        result = resp.json()
-        return result["choices"][0]["message"].get("content", "").strip()
-    except Exception as e:
-        logger.warning(f"AI持仓解读失败: {e}")
-        return ""
+    from sentiment.llm_client import chat_simple
+    reply = chat_simple(prompt, temperature=0.3, max_tokens=200, timeout=15)
+    return reply or ""
 
 
 def daily_report(push_format: bool = False) -> str:

@@ -53,9 +53,32 @@ SIGNAL_RUN_HOUR = 15
 SIGNAL_RUN_MINUTE = 30
 
 # ============ 智谱 GLM LLM 配置 ============
+# 主源: DeepSeek（OpenAI 兼容 API，¥1/百万 tokens，稳定）
+DEEPSEEK_API_KEY = "sk-951903d7ca2b452ba0303c78b0b398f1"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_MODEL = "deepseek-chat"
+
+# 备源: GLM-4-flash（智谱 AI，免费）
 LLM_API_KEY = "ae6f9312d393475088dd73b65fd3fd0d.I2Tj5lDL5IvexJV4"
 LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 LLM_MODEL = "glm-4-flash"
+
+# LLM provider 列表（按优先级，主家失败自动 fallback）
+# sentiment/llm_client.py:chat_completion() 按此顺序依次尝试
+LLM_PROVIDERS = [
+    {
+        "name": "deepseek",
+        "url": DEEPSEEK_BASE_URL,
+        "key": DEEPSEEK_API_KEY,
+        "model": DEEPSEEK_MODEL,
+    },
+    {
+        "name": "glm",
+        "url": LLM_BASE_URL,
+        "key": LLM_API_KEY,
+        "model": LLM_MODEL,
+    },
+]
 
 # ============ Brave Search API ============
 BRAVE_API_KEY = "BSA_6qnODLG_U_CLx6z4rlfy9YF-TQh"
