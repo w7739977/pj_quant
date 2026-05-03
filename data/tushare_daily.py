@@ -26,7 +26,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "ffdc605eabf943817596e0c3d68f5fbe5ed9e9cbe0af65d22313ed27")
+try:
+    from config.settings import TUSHARE_TOKEN
+except ImportError:
+    TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "")
 PARQUET_DIR = "data/daily_parquet"
 DB_PATH = "data/quant.db"
 

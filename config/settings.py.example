@@ -1,13 +1,32 @@
-"""
-项目配置文件
+"""项目配置 — 所有 secret 从环境变量读取
 
-密钥通过环境变量读取，请在项目根目录创建 .env 文件：
-  PUSHPLUS_TOKEN=your_token_here
-  LLM_API_KEY=your_key_here
-  WEB_TOKEN=your_web_token_here
+部署:
+  1. cp .env.example .env
+  2. 编辑 .env 填入各 API key
+  3. cron 入口 / shell 启动前 source .env
+     或用 systemd EnvironmentFile=/opt/pj_quant/.env
 """
-
 import os
+
+# 自动加载项目根目录的 .env (如存在) — 简化本地开发体验
+_ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.isfile(_ENV_PATH):
+    try:
+        with open(_ENV_PATH) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#"):
+                    continue
+                if "=" not in _line:
+                    continue
+                _k, _v = _line.split("=", 1)
+                _k = _k.strip()
+                _v = _v.strip().strip('"').strip("'")
+                # 仅当环境变量未设置时填入（环境变量优先级最高）
+                os.environ.setdefault(_k, _v)
+    except Exception:
+        pass
+
 
 # ============ 数据库 ============
 DB_PATH = "data/quant.db"
@@ -41,30 +60,68 @@ BACKTEST_END = "2025-12-31"
 # ============ 策略参数 ============
 MOMENTUM_LOOKBACK_DAYS = 20
 REBALANCE_DAYS = 40
-NUM_POSITIONS = 5
+NUM_POSITIONS = 10
 
 # ============ 止损止盈参数 ============
 STOP_LOSS_PCT = -0.08
 TAKE_PROFIT_PCT = 0.15
 MAX_HOLDING_DAYS = 20
 
-# ============ PushPlus 微信推送 ============
-PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
-
 # ============ 定时任务 ============
 SIGNAL_RUN_HOUR = 15
 SIGNAL_RUN_MINUTE = 30
 
-# ============ 智谱 GLM LLM 配置 ============
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# ============ 模拟盘参数 ============
+SIM_INITIAL_CAPITAL = 500000.0
+SIM_DB_PATH = "data/sim_trading.db"
+SIM_BAR_INTERVAL = 180     # 盘中轮询间隔(秒)
+
+
+# ============ Secrets — 从环境变量读取 ============
+
+# Tushare（数据源）
+TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "")
+
+# PushPlus 微信推送
+PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
+# 多账号推送：环境变量 PUSHPLUS_TOKENS=token1,token2,token3
+_pushplus_multi = os.getenv("PUSHPLUS_TOKENS", "")
+PUSHPLUS_TOKENS = [t.strip() for t in _pushplus_multi.split(",") if t.strip()] \
+    or ([PUSHPLUS_TOKEN] if PUSHPLUS_TOKEN else [])
+
+# Web 持仓同步服务
+WEB_TOKEN = os.getenv("WEB_TOKEN", "pj_quant_2026")  # 非 secret，默认值 OK
+
+# Brave Search API
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
+BRAVE_BASE_URL = "https://api.search.brave.com/res/v1/web/search"
+
+
+# ============ LLM Providers（DeepSeek 主，GLM 备）============
+
+# DeepSeek（OpenAI 兼容，¥1/百万 tokens，稳定）
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_MODEL = "deepseek-chat"
+
+# GLM-4-flash（智谱 AI，免费）— 备源
+LLM_API_KEY = os.getenv("GLM_API_KEY", "")
 LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 LLM_MODEL = "glm-4-flash"
 
-# ============ Brave Search API（已移除） ============
-BRAVE_BASE_URL = "https://api.search.brave.com/res/v1/web/search"
-
-# ============ 成长路线图 ============
-# Phase 1 (已完成): ETF 动量轮动
-# Phase 2 (下一步): 股债利差择时 + 可转债双低 + 多指标轮动
-# Phase 3 (进阶):   多因子选股 + 大小盘风格轮动
-# Phase 4 (高阶):   机器学习因子挖掘 + LLM 情绪分析
+# LLM provider 列表（按优先级，主家失败自动 fallback）
+# sentiment/llm_client.py:chat_completion() 按此顺序依次尝试
+LLM_PROVIDERS = [
+    {
+        "name": "deepseek",
+        "url": DEEPSEEK_BASE_URL,
+        "key": DEEPSEEK_API_KEY,
+        "model": DEEPSEEK_MODEL,
+    },
+    {
+        "name": "glm",
+        "url": LLM_BASE_URL,
+        "key": LLM_API_KEY,
+        "model": LLM_MODEL,
+    },
+]
