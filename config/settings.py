@@ -92,10 +92,6 @@ PUSHPLUS_TOKENS = [t.strip() for t in _pushplus_multi.split(",") if t.strip()] \
 # Web 持仓同步服务
 WEB_TOKEN = os.getenv("WEB_TOKEN", "pj_quant_2026")  # 非 secret，默认值 OK
 
-# Brave Search API
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
-BRAVE_BASE_URL = "https://api.search.brave.com/res/v1/web/search"
-
 
 # ============ LLM Providers（DeepSeek 主，GLM 备）============
 
