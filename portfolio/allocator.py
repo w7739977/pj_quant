@@ -811,8 +811,28 @@ def get_stock_picks_consensus(stock_capital: float, top_n: int = 10,
 
     # Step 7: 价格 + 整手 + reason 构建（与 live 共用）
     extra = f"5天共识(频次{filtered.iloc[0].get('consensus_freq', 0)}/{days_avail})"
-    return _finalize_picks(filtered, candidates, pred, ml_rank_map,
-                           stock_capital, top_n, extra_reason=extra)
+    final_picks = _finalize_picks(filtered, candidates, pred, ml_rank_map,
+                                   stock_capital, top_n, extra_reason=extra)
+
+    # 前向 OOS 累积：记录推送的 picks 到 picks_history 表（5d 后由
+    # evaluate_pending 自动算实际收益）。失败不阻塞推送主流程。
+    try:
+        from portfolio.picks_history import record_picks
+        cons_meta = {c["code"]: c for c in cons}
+        history_picks = [
+            {
+                "code": p.get("code"),
+                "freq": cons_meta.get(p.get("code"), {}).get("freq", 0),
+                "avg_score": cons_meta.get(p.get("code"), {}).get("avg_score", 0.0),
+            }
+            for p in final_picks if p.get("code")
+        ]
+        n = record_picks(today, history_picks, pick_top_n=top_n)
+        logger.info(f"picks_history 记录: {n} 只 picks (date={today})")
+    except Exception as e:
+        logger.warning(f"picks_history 记录失败 (不阻塞推送): {e}")
+
+    return final_picks
 
 
 def run_live_deploy(push: bool = False, simulate: bool = False,

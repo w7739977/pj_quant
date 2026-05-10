@@ -86,4 +86,11 @@ fi
 echo "[$(date +%H:%M:%S)] 归档信号..." | tee -a "$LOG_FILE"
 python3 scripts/postflight.py 2>&1 | tee -a "$LOG_FILE" || true
 
+# 阶段四：picks_history 评估（5d hold 已满的 picks 自动算实际收益+alpha）
+echo "[$(date +%H:%M:%S)] picks_history 评估..." | tee -a "$LOG_FILE"
+python3 -c "
+from portfolio.picks_history import evaluate_pending
+print('  evaluate_pending:', evaluate_pending())
+" 2>&1 | tee -a "$LOG_FILE" || true
+
 echo "[$(date +%H:%M:%S)] 日常执行完毕" | tee -a "$LOG_FILE"
