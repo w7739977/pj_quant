@@ -8,8 +8,9 @@ build/
 *.egg
 
 # Data & Models
-data/quant.db
+data/quant.db*
 data/sim_trading.db*
+data/backup/
 ml/models/*.json
 !ml/models/.gitkeep
 
