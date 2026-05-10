@@ -4,7 +4,10 @@
 
 import sys
 import os
+import tempfile
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -15,6 +18,27 @@ from server import app
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_storage_db(monkeypatch):
+    """每个测试用独立临时 db，避免读真 data/quant.db
+    (sync_from_prod.sh 同步期间真 db 处于中间状态会让测试失败；本 fixture
+    保证 server 测试不依赖外部数据状态)
+    """
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    import data.storage
+    monkeypatch.setattr(data.storage, "DB_PATH", path)
+    yield path
+    if os.path.exists(path):
+        os.unlink(path)
+
+
+def test_isolation_fixture_active():
+    """fixture 真把 data.storage.DB_PATH patch 到临时路径"""
+    import data.storage
+    assert data.storage.DB_PATH != "data/quant.db", "fixture 未生效"
 
 
 class TestAuth:

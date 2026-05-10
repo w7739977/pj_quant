@@ -1,10 +1,26 @@
 """测试财务因子接入"""
+import os
+import tempfile
+
 import pytest
 from unittest.mock import patch, MagicMock
 import pandas as pd
 
 
-def test_save_and_load_pit():
+@pytest.fixture
+def temp_fin_db(monkeypatch):
+    """每个测试用独立临时 db，避免读真 data/quant.db
+    (data/quant.db 在 sync_from_prod 同步期间会处于中间状态导致测试失败)
+    """
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    import data.financial_indicator
+    monkeypatch.setattr(data.financial_indicator, "DB_PATH", path)
+    yield path
+    os.unlink(path)
+
+
+def test_save_and_load_pit(temp_fin_db):
     """测试 save_batch + get_latest_pit"""
     from data.financial_indicator import save_batch, get_latest_pit
 
@@ -24,7 +40,7 @@ def test_save_and_load_pit():
     assert result == {}
 
 
-def test_pit_takes_latest():
+def test_pit_takes_latest(temp_fin_db):
     """同一股票多份公告，取最近的"""
     from data.financial_indicator import save_batch, get_latest_pit
 
