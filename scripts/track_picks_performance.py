@@ -145,17 +145,38 @@ def benchmark_5d(stock_data, D):
     return np.mean(rs) if rs else np.nan
 
 
+def _parse_top_ns(s: str) -> list[int]:
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
+def _load_st_codes(conn) -> set:
+    """从 industry_map 加载所有名字含 ST 的 code 集合 (近似 PIT，
+    假设 ST 状态在回测期内变化不大；严格 PIT 需 namechange 历史表)"""
+    return {
+        r[0] for r in conn.execute(
+            "SELECT code FROM industry_map "
+            "WHERE name LIKE '%ST%' OR name LIKE '*ST%'"
+        ).fetchall()
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     today = datetime.now().strftime("%Y-%m-%d")
     parser.add_argument("--start", default=f"{datetime.now().year}-01-01")
     parser.add_argument("--end", default=None)
+    parser.add_argument("--pick-top-ns", default="3,5,10",
+                        help="逗号分隔的 picks 数列表（每周一取多少只共识 picks）")
+    parser.add_argument("--exclude-st", action="store_true",
+                        help="排除 ST/*ST 股票（验证策略真 alpha 是否依赖 ST 反弹）")
     parser.add_argument("--out-csv", default="logs/picks_history_backtest.csv")
     parser.add_argument("--out-md", default="docs/picks_performance.md")
     args = parser.parse_args()
 
+    top_ns = _parse_top_ns(args.pick_top_ns)
     print(f"=== picks 表现追踪 ===")
     print(f"  start={args.start}, end={args.end or '自动'}")
+    print(f"  pick_top_ns={top_ns}, exclude_st={args.exclude_st}")
 
     print("\n[1/5] 加载财务 + 模型 + 池...")
     r._FIN_CACHE = load_all_pit_to_dict()
@@ -201,23 +222,44 @@ def main():
                if datetime.strptime(d, "%Y-%m-%d").weekday() == 0]
     print(f"  周一: {len(mondays)} 个")
 
-    print("\n[4/5] 对每周一构建 picks + 算 5d 收益...")
+    st_codes = _load_st_codes(conn) if args.exclude_st else set()
+    if args.exclude_st:
+        print(f"  exclude_st: 加载 {len(st_codes)} 只 ST 股")
+
+    print(f"\n[4/5] 对每周一构建 picks + 算 5d 收益（top_n in {top_ns}）...")
     rows = []
+    skipped_st_total = 0
     for D in mondays:
-        picks = consensus_picks_for(D, daily_scored, buffer_dates)
-        if not picks:
-            continue
         bench = benchmark_5d(stock_data, D)
-        for rank, p in enumerate(picks, 1):
-            ret = fwd_return(stock_data, p["code"], D)
-            if ret is None:
-                continue
-            rows.append({
-                "monday": D, "rank": rank, "code": p["code"],
-                "freq": p["freq"], "avg_score": round(p["avg_score"], 4),
-                "ret_5d": ret, "bench_5d": bench,
-                "alpha": ret - bench if not pd.isna(bench) else np.nan,
-            })
+        ret_cache = {}
+        max_top = max(top_ns)
+        # 内部 cache top_n 固定 10（生产语义），picks 候选放宽到 max_top * 2
+        # 让排除 ST 后仍有足够候选填到 max_top
+        picks_full = consensus_picks_for(D, daily_scored, buffer_dates,
+                                         top_n=max(10, max_top * 2))
+        if not picks_full:
+            continue
+        if st_codes:
+            before = len(picks_full)
+            picks_full = [p for p in picks_full if p["code"] not in st_codes]
+            skipped_st_total += before - len(picks_full)
+        for top_n in top_ns:
+            for rank, p in enumerate(picks_full[:top_n], 1):
+                code = p["code"]
+                if code not in ret_cache:
+                    ret_cache[code] = fwd_return(stock_data, code, D)
+                ret = ret_cache[code]
+                if ret is None:
+                    continue
+                rows.append({
+                    "pick_top_n": top_n,
+                    "monday": D, "rank": rank, "code": code,
+                    "freq": p["freq"], "avg_score": round(p["avg_score"], 4),
+                    "ret_5d": ret, "bench_5d": bench,
+                    "alpha": ret - bench if not pd.isna(bench) else np.nan,
+                })
+    if args.exclude_st:
+        print(f"  累计跳过 ST picks: {skipped_st_total}")
     df = pd.DataFrame(rows)
     if df.empty:
         print("❌ 无有效 picks")
@@ -232,93 +274,110 @@ def main():
     return 0
 
 
-def write_report(df: pd.DataFrame, out_md: str) -> None:
-    n_weeks = df["monday"].nunique()
-    n_picks = len(df)
-    win_rate = (df["ret_5d"] > 0).mean()
-    avg_ret = df["ret_5d"].mean()
-    avg_alpha = df["alpha"].mean()
-
-    pnl = df["ret_5d"]
+def _summary_for(sub: pd.DataFrame) -> dict:
+    """单个 pick_top_n 子集的总览指标"""
+    pnl = sub["ret_5d"]
     stats = trade_statistics(pnl)
-
-    # 周度组合等权
-    weekly = df.groupby("monday").agg(
-        n_picks=("code", "count"),
+    weekly = sub.groupby("monday").agg(
         avg_ret=("ret_5d", "mean"),
         bench=("bench_5d", "first"),
-        win_n=("ret_5d", lambda x: (x > 0).sum()),
     ).reset_index()
     weekly["alpha"] = weekly["avg_ret"] - weekly["bench"]
     cum_ret = (1 + weekly["avg_ret"]).cumprod() - 1
     cum_alpha = (1 + weekly["alpha"]).cumprod() - 1
+    return {
+        "n_weeks": sub["monday"].nunique(),
+        "n_picks": len(sub),
+        "win_rate": stats["win_rate"],
+        "avg_ret": pnl.mean(),
+        "avg_alpha": sub["alpha"].mean(),
+        "profit_factor": stats["profit_factor"],
+        "expectancy": stats["expectancy"],
+        "avg_win": stats["avg_win"],
+        "avg_loss": stats["avg_loss"],
+        "largest_win": stats["largest_win"],
+        "largest_loss": stats["largest_loss"],
+        "cum_ret": cum_ret.iloc[-1] if len(cum_ret) else 0.0,
+        "cum_alpha": cum_alpha.iloc[-1] if len(cum_alpha) else 0.0,
+        "weekly_alpha_std": weekly["alpha"].std(ddof=1) if len(weekly) > 1 else 0.0,
+        "weekly_sharpe": (weekly["alpha"].mean() / weekly["alpha"].std(ddof=1)
+                          if len(weekly) > 1 and weekly["alpha"].std(ddof=1) > 0 else 0.0),
+    }
 
-    # 排名维度的胜率（rank 1 vs rank 10）
-    by_rank = df.groupby("rank").agg(
+
+def write_report(df: pd.DataFrame, out_md: str) -> None:
+    top_ns = sorted(df["pick_top_n"].unique())
+    summaries = {n: _summary_for(df[df["pick_top_n"] == n]) for n in top_ns}
+
+    # 取最大 top_n 用作 top winners/losers / by_rank（picks 集合包含小 top_n）
+    max_top = max(top_ns)
+    full = df[df["pick_top_n"] == max_top]
+    by_rank = full.groupby("rank").agg(
         n=("code", "count"),
         avg_ret=("ret_5d", "mean"),
         win_rate=("ret_5d", lambda x: (x > 0).mean()),
         avg_alpha=("alpha", "mean"),
     ).round(4)
+    top_winners = full.nlargest(10, "ret_5d")[["monday", "rank", "code", "freq", "ret_5d", "alpha"]]
+    top_losers = full.nsmallest(10, "ret_5d")[["monday", "rank", "code", "freq", "ret_5d", "alpha"]]
 
-    top_winners = df.nlargest(10, "ret_5d")[["monday", "rank", "code", "freq", "ret_5d", "alpha"]]
-    top_losers = df.nsmallest(10, "ret_5d")[["monday", "rank", "code", "freq", "ret_5d", "alpha"]]
-
-    md = f"""# Picks 表现追踪 (历史回测视角)
+    md = f"""# Picks 表现追踪 — Rank 精选对照 (D_top{'/'.join(map(str, top_ns))})
 
 **生成日期**: {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")}
 **回测区间**: {df['monday'].min()} ~ {df['monday'].max()}
 **模型**: `xgb_ranker.json` (PRODUCTION_MODEL)
-**方案**: D 频次共识 (5 天 window, top 10), 5 天持有
+**方案**: D 频次共识 (5 天 window, 5 天持有)
 
-## 总览
+## 改进点 #1: Rank 精选 — 多 top_n 对照
 
-| 指标 | 值 |
-|---|---:|
-| 周数 | {n_weeks} |
-| picks 总数 | {n_picks} |
-| 胜率 (5d ret > 0) | **{win_rate * 100:.1f}%** |
-| 平均 5d 收益 | {avg_ret * 100:+.2f}% |
-| 平均 5d alpha (vs 池等权) | **{avg_alpha * 100:+.2f}pp** |
-| 累计 alpha (复利) | **{cum_alpha.iloc[-1] * 100:+.2f}%** |
-| 累计绝对收益 (复利) | {cum_ret.iloc[-1] * 100:+.2f}% |
+理论支撑: IC decay 单调性 (Grinold-Kahn) / 业界 top decile 标准 / 过度分散摊薄 alpha
+(Markowitz 边际效用递减)。预期：D_top3 > D_top5 > D_top10 在 PF / sharpe / alpha。
 
-## Per-Pick 统计 (portfolio-analytics.trade_statistics)
+| 指标 | """ + " | ".join(f"D_top{n}" for n in top_ns) + " |\n"
+    md += "|---|" + "|".join(["---:"] * len(top_ns)) + "|\n"
 
-| 指标 | 值 |
-|---|---:|
-| 总 picks | {stats['total_trades']} |
-| 胜率 | {stats['win_rate'] * 100:.1f}% |
-| 平均盈利 | {stats['avg_win'] * 100:+.2f}% |
-| 平均亏损 | {stats['avg_loss'] * 100:+.2f}% |
-| 最大盈利 | {stats['largest_win'] * 100:+.2f}% |
-| 最大亏损 | {stats['largest_loss'] * 100:+.2f}% |
-| Profit Factor | {stats['profit_factor']:.2f} |
-| Expectancy (期望) | {stats['expectancy'] * 100:+.2f}% |
+    def row(label, key, fmt):
+        return ("| " + label + " | "
+                + " | ".join(fmt(summaries[n][key]) for n in top_ns) + " |\n")
 
-## 周度表现
+    md += row("周数", "n_weeks", lambda v: str(int(v)))
+    md += row("picks 总数", "n_picks", lambda v: str(int(v)))
+    md += row("胜率", "win_rate", lambda v: f"**{v * 100:.1f}%**")
+    md += row("平均 5d 收益", "avg_ret", lambda v: f"{v * 100:+.2f}%")
+    md += row("平均 5d alpha (pp)", "avg_alpha", lambda v: f"**{v * 100:+.2f}**")
+    md += row("Profit Factor", "profit_factor", lambda v: f"**{v:.2f}**")
+    md += row("Expectancy", "expectancy", lambda v: f"{v * 100:+.2f}%")
+    md += row("avg win", "avg_win", lambda v: f"{v * 100:+.2f}%")
+    md += row("avg loss", "avg_loss", lambda v: f"{v * 100:+.2f}%")
+    md += row("largest win", "largest_win", lambda v: f"{v * 100:+.2f}%")
+    md += row("largest loss", "largest_loss", lambda v: f"{v * 100:+.2f}%")
+    md += row("累计 alpha (复利)", "cum_alpha", lambda v: f"**{v * 100:+.2f}%**")
+    md += row("累计 ret (复利)", "cum_ret", lambda v: f"{v * 100:+.2f}%")
+    md += row("周度 alpha σ", "weekly_alpha_std", lambda v: f"{v * 100:.2f}%")
+    md += row("周度 sharpe-like", "weekly_sharpe", lambda v: f"**{v:.3f}**")
 
-| 周一 | picks | 等权 5d | bench 5d | alpha | 胜数 |
-|---|---:|---:|---:|---:|---:|
-"""
-    for _, w in weekly.iterrows():
-        md += (f"| {w['monday']} | {int(w['n_picks'])} | "
-               f"{w['avg_ret'] * 100:+.2f}% | {w['bench'] * 100:+.2f}% | "
-               f"{w['alpha'] * 100:+.2f}% | {int(w['win_n'])}/{int(w['n_picks'])} |\n")
-
+    # 决策摘要
+    best = max(top_ns, key=lambda n: summaries[n]["weekly_sharpe"])
+    pf_winner = max(top_ns, key=lambda n: summaries[n]["profit_factor"])
     md += f"""
-**累计 alpha 曲线**: {' → '.join(f'{x * 100:+.1f}%' for x in cum_alpha)}
+**决策**:
+- sharpe 最优: **D_top{best}** ({summaries[best]['weekly_sharpe']:.3f})
+- profit factor 最优: **D_top{pf_winner}** ({summaries[pf_winner]['profit_factor']:.2f})
+- 胜率最优: **D_top{max(top_ns, key=lambda n: summaries[n]['win_rate'])}** ({max(summaries[n]['win_rate'] for n in top_ns) * 100:.1f}%)
 
 ## 按排名 (rank 1 = 当周共识最高)
+
+基于 D_top{max_top} 全集；小 top_n 是其前缀。
 
 | rank | n | 胜率 | avg ret | avg alpha |
 |---:|---:|---:|---:|---:|
 """
-    for rank, row in by_rank.iterrows():
-        md += (f"| {rank} | {int(row['n'])} | {row['win_rate'] * 100:.0f}% | "
-               f"{row['avg_ret'] * 100:+.2f}% | {row['avg_alpha'] * 100:+.2f}% |\n")
+    for rank, r_row in by_rank.iterrows():
+        md += (f"| {rank} | {int(r_row['n'])} | {r_row['win_rate'] * 100:.0f}% | "
+               f"{r_row['avg_ret'] * 100:+.2f}% | {r_row['avg_alpha'] * 100:+.2f}% |\n")
 
-    md += "\n## Top 10 赢家\n\n| 周一 | rank | code | freq | 5d ret | alpha |\n|---|---:|:---|---:|---:|---:|\n"
+    md += "\n## Top 10 赢家 (D_top{} 全集)\n\n".format(max_top)
+    md += "| 周一 | rank | code | freq | 5d ret | alpha |\n|---|---:|:---|---:|---:|---:|\n"
     for _, w in top_winners.iterrows():
         md += (f"| {w['monday']} | {int(w['rank'])} | {w['code']} | {int(w['freq'])} | "
                f"{w['ret_5d'] * 100:+.2f}% | {w['alpha'] * 100:+.2f}% |\n")
@@ -331,14 +390,13 @@ def write_report(df: pd.DataFrame, out_md: str) -> None:
     md += f"""
 ## 解读
 
-- **胜率 {win_rate * 100:.0f}%**: {'高于 50% — 模型有正向 edge' if win_rate > 0.5 else '低于 50% — 模型胜率不足，但 expectancy 仍可能为正（赢多输少）'}
-- **Profit Factor {stats['profit_factor']:.2f}**: {'>1.5 优秀' if stats['profit_factor'] > 1.5 else '>1 仍盈利' if stats['profit_factor'] > 1 else '<1 整体亏损'}
-- **Expectancy {stats['expectancy'] * 100:+.2f}%**: 单只 pick 的期望收益（含输赢概率加权）
-- **Rank-by-Rank**: rank 1 (最高共识) 胜率 / 收益是否显著高于 rank 10？这反映共识分数是否真有 alpha
+- **PF 最优 D_top{pf_winner} = {summaries[pf_winner]['profit_factor']:.2f}**: {'已超 1.5 业界 acceptable 阈值' if summaries[pf_winner]['profit_factor'] > 1.5 else '仍未达 1.5 业界 acceptable，但比 D_top10 改善'}
+- **Rank-by-Rank**: rank 1-3 vs rank 4-10 的胜率/alpha 落差是 IC decay 的实证；如果 rank 1-3 显著更好，rank 精选有效
+- **统计稳健性**: D_top3 picks 数仅 {summaries[3]['n_picks'] if 3 in summaries else 'n/a'}（vs D_top10 的 {summaries[10]['n_picks'] if 10 in summaries else 'n/a'}），样本更小标准误更大；需谨慎外推
 
 ## 局限
 
-- 13 周样本仍小（quant-analyst 已指出 paired t p > 0.05）
+- 14 周样本仍小（walk-forward-validation skill 已指出 paired t p ≈ 0.11）
 - 未含交易成本（实盘换手 ~30%/周）
 - bench = 池等权（5e8-5e9 小盘），与上证/沪深 300 表现可能差异大
 - pick 不区分行业/板块；行业集中度风险未呈现

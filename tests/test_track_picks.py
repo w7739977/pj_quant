@@ -8,8 +8,78 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from track_picks_performance import (  # noqa: E402
-    consensus_picks_for, fwd_return, benchmark_5d,
+    consensus_picks_for, fwd_return, benchmark_5d, _parse_top_ns, _summary_for,
+    _load_st_codes,
 )
+
+
+# ============ _load_st_codes ============
+
+def test_load_st_codes_empty():
+    """无 industry_map 表 / 无 ST 股 → 空 set"""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE industry_map (code TEXT, name TEXT)")
+    conn.execute("INSERT INTO industry_map VALUES ('000001', '平安银行')")
+    conn.execute("INSERT INTO industry_map VALUES ('600519', '贵州茅台')")
+    conn.commit()
+    assert _load_st_codes(conn) == set()
+
+
+def test_load_st_codes_matches_st_prefix():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE industry_map (code TEXT, name TEXT)")
+    conn.execute("INSERT INTO industry_map VALUES ('002731', 'ST萃华')")
+    conn.execute("INSERT INTO industry_map VALUES ('600599', '*ST熊猫')")
+    conn.execute("INSERT INTO industry_map VALUES ('000001', '平安银行')")
+    conn.commit()
+    st = _load_st_codes(conn)
+    assert st == {"002731", "600599"}
+
+
+# ============ _parse_top_ns ============
+
+def test_parse_top_ns_basic():
+    assert _parse_top_ns("3,5,10") == [3, 5, 10]
+
+
+def test_parse_top_ns_whitespace():
+    assert _parse_top_ns(" 3 , 5,  10 ") == [3, 5, 10]
+
+
+def test_parse_top_ns_single():
+    assert _parse_top_ns("10") == [10]
+
+
+def test_parse_top_ns_empty_segments():
+    """trailing comma 不应报错"""
+    assert _parse_top_ns("3,5,") == [3, 5]
+
+
+# ============ _summary_for ============
+
+def test_summary_for_handles_empty():
+    sub = pd.DataFrame(columns=["monday", "ret_5d", "bench_5d", "alpha"])
+    s = _summary_for(sub)
+    assert s["n_picks"] == 0
+    assert s["weekly_sharpe"] == 0.0
+
+
+def test_summary_for_basic():
+    """5 picks 全胜 → win_rate=100, profit_factor=inf, expectancy>0"""
+    sub = pd.DataFrame([
+        {"monday": "2026-01-05", "ret_5d": 0.05, "bench_5d": 0.02, "alpha": 0.03},
+        {"monday": "2026-01-05", "ret_5d": 0.03, "bench_5d": 0.02, "alpha": 0.01},
+        {"monday": "2026-01-12", "ret_5d": 0.04, "bench_5d": 0.02, "alpha": 0.02},
+        {"monday": "2026-01-12", "ret_5d": 0.06, "bench_5d": 0.02, "alpha": 0.04},
+        {"monday": "2026-01-19", "ret_5d": 0.02, "bench_5d": 0.02, "alpha": 0.00},
+    ])
+    s = _summary_for(sub)
+    assert s["n_picks"] == 5
+    assert s["n_weeks"] == 3
+    assert s["win_rate"] == pytest.approx(1.0)
+    assert s["expectancy"] > 0
 
 
 # ============ fwd_return ============
