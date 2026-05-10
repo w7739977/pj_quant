@@ -33,6 +33,19 @@ logger = logging.getLogger(__name__)
 DB_PATH = "data/quant.db"
 TABLE = "daily_scored_cache"
 
+# 退市/停牌守卫：tail(N) 取窗口可能返回陈旧数据，距目标日超过此天数视为非活跃。
+# 7 天能容忍周末 + 短假；春节这类长假用脚本 --end 显式指定时段以规避。
+MAX_STALE_DAYS = 7
+
+
+def is_window_fresh(last_bar, target, max_gap_days: int = MAX_STALE_DAYS) -> bool:
+    """窗口最末 bar 是否距 target 不超过 max_gap_days。
+
+    用于 backfill / 回测的 DataFrame 路径（`win.iloc[-1]["date_str"]`）。
+    SQL 路径见 `_is_active`。
+    """
+    return (pd.Timestamp(target) - pd.Timestamp(last_bar)).days <= max_gap_days
+
 
 def _init_table(conn: sqlite3.Connection) -> None:
     """Create daily_scored_cache table if not exists."""
@@ -50,22 +63,27 @@ def _init_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _is_active(conn: sqlite3.Connection, code: str, date: str, max_gap_days: int = 7) -> bool:
-    """检查 code 在 date 当日是否仍活跃（最近一根 bar 距 date 不超过 max_gap_days）。
+def _is_active(conn: sqlite3.Connection, code: str, date: str,
+               max_gap_days: int = MAX_STALE_DAYS) -> bool:
+    """SQL 版活跃度检查：兜底用，阻止 cache_scored 写入退市/停牌股。
 
-    用于阻止退市/停牌股污染 cache：backfill 主路径已加新鲜度守卫，这里是兜底双保险。
+    backfill 主路径已加新鲜度守卫；这里是双保险。
     """
-    table = f"stock_{code}"
+    from factors.data_loader import _safe_table_name
     try:
-        row = conn.execute(
-            f"SELECT MAX(date) FROM {table} WHERE date <= ?", (date,)
-        ).fetchone()
-    except sqlite3.OperationalError:
+        table = _safe_table_name(code)
+    except ValueError:
         return False
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone():
+        return False
+    row = conn.execute(
+        f"SELECT MAX(date) FROM {table} WHERE date <= ?", (date,)
+    ).fetchone()
     if not row or not row[0]:
         return False
-    last_bar = str(row[0])[:10]
-    return (pd.to_datetime(date) - pd.to_datetime(last_bar)).days <= max_gap_days
+    return is_window_fresh(str(row[0])[:10], date, max_gap_days)
 
 
 def cache_scored(date: str, scored_df: pd.DataFrame, top_n: int = 10) -> int:
@@ -102,7 +120,9 @@ def cache_scored(date: str, scored_df: pd.DataFrame, top_n: int = 10) -> int:
                 continue
             rows.append((date, code, float(row["final_score"]), int(row["rank"]), now))
         if skipped:
-            logger.warning(f"cache_scored {date}: 跳过非活跃股 {skipped}")
+            sample = skipped[:10]
+            more = f" (+{len(skipped) - 10} more)" if len(skipped) > 10 else ""
+            logger.warning(f"cache_scored {date}: 跳过 {len(skipped)} 只非活跃股 {sample}{more}")
         if not rows:
             return 0
         conn.executemany(

@@ -64,8 +64,14 @@ DELETE FROM daily_scored_cache WHERE date <= '2026-04-30';
 ```
 保留 2026-05-02 干净 cache。备份在 `data/backup/daily_scored_cache_polluted_20260509.csv`。
 
+## 二级 confounder（修复后由新鲜度守卫间接屏蔽）
+
+- **财务因子 PIT 旧值**：`backfill_consensus_cache.py` 中 `_lookup_financial_pit(sym, D)` 对退市股按公告日仍返回最后一份财报。修复前这些 row 进入 `fdf` 参与横截面 winsorize / z-score，拉偏全市场分位数；修复后退市股不进 `fdf`，PIT 路径间接被屏蔽，但本身没修。
+- **股票池层无活跃度过滤**：`factors/data_loader.get_small_cap_stocks()` 仅按 `latest_market_cap` 筛市值，退市股最后一次市值若落在 5-50 亿仍会出现在 pool。新鲜度守卫是**唯一防线**，缺冗余。建议 pool 层加 `last_bar` 检查（todo 已登记）。
+
 ## 经验
 
 - `tail(N)` 在退市/停牌场景下会静默返回**陈旧窗口**，长度检查 `len >= 20` 形同虚设——必须额外校验最末 bar 的**实际日期**。
 - 生产 live 路径用绝对日期范围过滤是正确写法（`factors/calculator.py:178`），backfill / 回测脚本应该对齐这一约定，而不是图便宜用 `tail(N)`。
 - 同样的 bug 模式可能潜伏在其他 `tail(...)` 调用里，未来如果新增 backfill 或离线评分脚本，code review 时优先查这个模式。
+- 新鲜度阈值当前为 7 自然日（`portfolio/consensus.py:MAX_STALE_DAYS`），春节连休 9-15 天会误剔除真活跃股，已识别但暂未修，依赖运维用 `--end` 显式跨节回避。改为交易日基线（chinese_calendar）是 P1 待办。

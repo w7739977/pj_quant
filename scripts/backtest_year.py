@@ -43,6 +43,7 @@ from factors.data_loader import get_small_cap_stocks
 from data.storage import load_stock_daily
 from data.financial_indicator import load_all_pit_to_dict
 from strategy.small_cap import SmallCapStrategy
+from portfolio.consensus import is_window_fresh
 
 TOP_N = 10
 HOLD = 5
@@ -130,15 +131,13 @@ def main():
     for i, D in enumerate(buffer_dates, 1):
         if i % 10 == 0:
             print(f"  [{D}] {i}/{len(buffer_dates)}")
+        D_ts = pd.Timestamp(D)
         rows = []
         for sym, df in stock_data.items():
             win = df[df["date_str"] <= D].tail(120)
             if len(win) < 20:
                 continue
-            # 新鲜度守卫：回测期内退市/停牌的股票，tail(120) 会拿到陈旧窗口
-            # 进入横截面 winsorize/z-score，拉偏分布；这里把窗口最末 bar 距 D > 7 天的剔除
-            last_bar = pd.to_datetime(win.iloc[-1]["date_str"])
-            if (pd.to_datetime(D) - last_bar).days > 7:
+            if not is_window_fresh(win.iloc[-1]["date_str"], D_ts):
                 continue
             f = {"code": sym}
             f.update(calc_momentum(win)); f.update(calc_volatility(win))
