@@ -23,7 +23,7 @@ import os
 import sqlite3
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -33,18 +33,31 @@ logger = logging.getLogger(__name__)
 DB_PATH = "data/quant.db"
 TABLE = "daily_scored_cache"
 
-# 退市/停牌守卫：tail(N) 取窗口可能返回陈旧数据，距目标日超过此天数视为非活跃。
-# 7 天能容忍周末 + 短假；春节这类长假用脚本 --end 显式指定时段以规避。
-MAX_STALE_DAYS = 7
+# 退市/停牌守卫：last bar 距目标日超过此 *交易日数* 视为非活跃。
+# 5 = 一周工作日，足以容忍周末 + 调休短假；用 chinese_calendar 排除节假日，
+# 春节 / 国庆等连休下节后第一周的真活跃股不会被误剔除（自然日基线会误杀）。
+MAX_STALE_DAYS = 5
 
 
 def is_window_fresh(last_bar, target, max_gap_days: int = MAX_STALE_DAYS) -> bool:
-    """窗口最末 bar 是否距 target 不超过 max_gap_days。
+    """窗口最末 bar 距 target 不超过 max_gap_days 个 *交易日*。
 
-    用于 backfill / 回测的 DataFrame 路径（`win.iloc[-1]["date_str"]`）。
+    用 chinese_calendar 排除周末 + 节假日。chinese_calendar 不覆盖目标年份
+    时回退到自然日（max_gap_days * 7 // 5 + 1，5 交易日 ≈ 8 自然日）。
+
+    用于 backfill / 回测的 DataFrame 路径（`win.iloc[-1]["date_str"]`）；
     SQL 路径见 `_is_active`。
     """
-    return (pd.Timestamp(target) - pd.Timestamp(last_bar)).days <= max_gap_days
+    last_dt = pd.Timestamp(last_bar).date()
+    target_dt = pd.Timestamp(target).date()
+    if last_dt >= target_dt:
+        return True
+    try:
+        import chinese_calendar
+        gap = len(chinese_calendar.get_workdays(last_dt + timedelta(days=1), target_dt))
+    except (NotImplementedError, ImportError):
+        return (target_dt - last_dt).days <= max_gap_days * 7 // 5 + 1
+    return gap <= max_gap_days
 
 
 def _init_table(conn: sqlite3.Connection) -> None:

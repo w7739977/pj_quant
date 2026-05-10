@@ -141,7 +141,7 @@ def test_cache_stats(temp_db):
     assert stats["max_date"] == "2026-03-31"
 
 
-# ============ 新鲜度守卫 — is_window_fresh ============
+# ============ 新鲜度守卫 — is_window_fresh (交易日基线) ============
 
 def test_is_window_fresh_same_day():
     """target == last_bar，gap=0，新鲜"""
@@ -149,19 +149,41 @@ def test_is_window_fresh_same_day():
 
 
 def test_is_window_fresh_at_threshold():
-    """gap == 7 边界仍视为新鲜"""
+    """5 个交易日 (4-24, 4-27, 4-28, 4-29, 4-30) 内仍视为新鲜（边界）"""
+    # 2026-04-23(周四) → 2026-04-30(周四): get_workdays(4-24, 4-30) = 5 个
     assert consensus.is_window_fresh("2026-04-23", "2026-04-30") is True
 
 
 def test_is_window_fresh_just_over():
-    """gap == 8 已超阈值，非新鲜"""
+    """6 个交易日已超 5 阈值，非新鲜"""
+    # 2026-04-22(周三) → 2026-04-30(周四): get_workdays(4-23, 4-30) = 6 个
     assert consensus.is_window_fresh("2026-04-22", "2026-04-30") is False
+
+
+def test_is_window_fresh_skips_weekend():
+    """周末不计入交易日数 — last_bar 周一，target 同周五，gap=4 个交易日"""
+    # 2026-04-27(周一) → 2026-05-01: get_workdays(4-28, 5-1) = 4-28, 4-29, 4-30 = 3 (5-1 劳动节)
+    assert consensus.is_window_fresh("2026-04-27", "2026-05-01") is True
+
+
+def test_is_window_fresh_skips_holiday_labour():
+    """劳动节 5 天连休：节前 last_bar 节后查仍新鲜（自然日 9 天）"""
+    # 2026-04-30(周四) → 2026-05-08(周五): 自然日 8 天，但只 3 个交易日 (5-6/7/8)
+    assert consensus.is_window_fresh("2026-04-30", "2026-05-08") is True
+
+
+def test_is_window_fresh_skips_holiday_spring():
+    """春节连休：自然日 7 天阈值会误杀的场景，交易日基线下保留"""
+    # 2026-02-13(周五，春节前最后交易日) → 2026-02-24(春节后首个交易日)
+    # 自然日 11 天 > 7（旧逻辑误杀）；交易日 = get_workdays(2-14, 2-24) = 仅 2-24 = 1 个
+    assert consensus.is_window_fresh("2026-02-13", "2026-02-24") is True
 
 
 def test_is_window_fresh_custom_threshold():
     """自定义 max_gap_days 生效"""
-    assert consensus.is_window_fresh("2026-04-25", "2026-04-30", max_gap_days=5) is True
-    assert consensus.is_window_fresh("2026-04-24", "2026-04-30", max_gap_days=5) is False
+    # 2026-04-27(周一) → 2026-04-30(周四): 3 个交易日 (4-28/29/30)
+    assert consensus.is_window_fresh("2026-04-27", "2026-04-30", max_gap_days=3) is True
+    assert consensus.is_window_fresh("2026-04-27", "2026-04-30", max_gap_days=2) is False
 
 
 def test_is_window_fresh_accepts_timestamp_target():

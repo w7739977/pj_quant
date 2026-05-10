@@ -36,19 +36,21 @@ def _filter_tradeable(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
-def _filter_active(df: pd.DataFrame, max_gap_days=None) -> pd.DataFrame:
-    """剔除最近一根 bar 距今超过 max_gap_days 的股票（退市/长期停牌）。
+def _filter_active(df: pd.DataFrame, max_gap_days=None, today=None) -> pd.DataFrame:
+    """剔除最近一根 bar 距 today 超过 max_gap_days *交易日* 的股票。
 
-    与 `portfolio.consensus` 的新鲜度守卫双保险：在 pool 入口就把"永久退市
-    但 latest_market_cap 仍有最后一次市值"的股票拦下，减少下游 winsorize /
-    z-score 的污染概率。
+    与 `portfolio.consensus.is_window_fresh` 同语义（chinese_calendar
+    排除节假日），在 pool 入口就把"永久退市 / 长期停牌"的股票拦下，作为
+    cache_scored 守卫的冗余防线。
+
+    today 默认 `pd.Timestamp.now().normalize()`，测试可注入固定日期。
     """
     if df.empty or "code" not in df.columns:
         return df
+    from portfolio.consensus import MAX_STALE_DAYS, is_window_fresh
     if max_gap_days is None:
-        from portfolio.consensus import MAX_STALE_DAYS
         max_gap_days = MAX_STALE_DAYS
-    threshold = pd.Timestamp.now().normalize() - pd.Timedelta(days=max_gap_days)
+    today_str = pd.Timestamp(today or pd.Timestamp.now().normalize()).strftime("%Y-%m-%d")
 
     from config.settings import DB_PATH
     conn = sqlite3.connect(DB_PATH)
@@ -66,14 +68,14 @@ def _filter_active(df: pd.DataFrame, max_gap_days=None) -> pd.DataFrame:
             row = conn.execute(f"SELECT MAX(date) FROM {table}").fetchone()
             if not row or not row[0]:
                 continue
-            if pd.to_datetime(row[0]) >= threshold:
+            if is_window_fresh(str(row[0])[:10], today_str, max_gap_days):
                 keep.append(code)
     finally:
         conn.close()
 
     dropped = len(df) - len(keep)
     if dropped > 0:
-        logger.info(f"  剔除非活跃股 (last_bar > {max_gap_days}天): {dropped} 只")
+        logger.info(f"  剔除非活跃股 (last_bar > {max_gap_days} 交易日): {dropped} 只")
     return df[df["code"].isin(keep)].reset_index(drop=True)
 
 
