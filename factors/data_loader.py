@@ -36,6 +36,47 @@ def _filter_tradeable(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
+def _filter_active(df: pd.DataFrame, max_gap_days=None) -> pd.DataFrame:
+    """剔除最近一根 bar 距今超过 max_gap_days 的股票（退市/长期停牌）。
+
+    与 `portfolio.consensus` 的新鲜度守卫双保险：在 pool 入口就把"永久退市
+    但 latest_market_cap 仍有最后一次市值"的股票拦下，减少下游 winsorize /
+    z-score 的污染概率。
+    """
+    if df.empty or "code" not in df.columns:
+        return df
+    if max_gap_days is None:
+        from portfolio.consensus import MAX_STALE_DAYS
+        max_gap_days = MAX_STALE_DAYS
+    threshold = pd.Timestamp.now().normalize() - pd.Timedelta(days=max_gap_days)
+
+    from config.settings import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        keep = []
+        for code in df["code"]:
+            try:
+                table = _safe_table_name(str(code))
+            except ValueError:
+                continue
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone():
+                continue
+            row = conn.execute(f"SELECT MAX(date) FROM {table}").fetchone()
+            if not row or not row[0]:
+                continue
+            if pd.to_datetime(row[0]) >= threshold:
+                keep.append(code)
+    finally:
+        conn.close()
+
+    dropped = len(df) - len(keep)
+    if dropped > 0:
+        logger.info(f"  剔除非活跃股 (last_bar > {max_gap_days}天): {dropped} 只")
+    return df[df["code"].isin(keep)].reset_index(drop=True)
+
+
 def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataFrame:
     """
     获取股票池（汇总表 → 本地SQLite → 腾讯API → AKShare 多级降级）
@@ -63,6 +104,7 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
         if results:
             stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
             stock_df = _filter_tradeable(stock_df)
+            stock_df = _filter_active(stock_df)
             logger.info(f"汇总表 mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
             return stock_df
     except Exception as e:
@@ -99,6 +141,7 @@ def get_small_cap_stocks(min_cap: float = 5e8, max_cap: float = 5e9) -> pd.DataF
         if results:
             stock_df = pd.DataFrame(results).sort_values("market_cap").reset_index(drop=True)
             stock_df = _filter_tradeable(stock_df)
+            stock_df = _filter_active(stock_df)
             logger.info(f"本地 total_mv 筛选: {len(stock_df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
             return stock_df
         else:
@@ -132,6 +175,7 @@ def _fallback_tencent(cached: list, min_cap: float, max_cap: float) -> pd.DataFr
             ]
             stock_df = stock_df.sort_values("market_cap").reset_index(drop=True)
             stock_df = _filter_tradeable(stock_df)
+            stock_df = _filter_active(stock_df)
             logger.info(f"腾讯 API 兜底: {len(stock_df)} 只")
             return stock_df
     except Exception as e:
@@ -155,6 +199,7 @@ def _fallback_akshare(min_cap: float, max_cap: float) -> pd.DataFrame:
         df = df[~df["name"].str.contains("ST|退|N", na=False)]
         # 通过 is_tradeable 统一过滤（剔除 B 股 + 北交所，保留科创板 688）
         df = _filter_tradeable(df)
+        df = _filter_active(df)
         df = df.sort_values("market_cap").reset_index(drop=True)
         logger.info(f"AKShare 股票池: {len(df)} 只 ({min_cap/1e8:.0f}~{max_cap/1e8:.0f}亿)")
         return df
