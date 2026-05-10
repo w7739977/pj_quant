@@ -1,22 +1,33 @@
 # Bug: 共识选股退市股污染
 
 **发现日期**: 2026-05-09
+**修复日期**: 2026-05-09
 **严重程度**: 高 (生产环境 D 方案失效)
-**状态**: 待修复
+**状态**: 已修复
 
-## 问题
+## 现象
 
-`daily_scored_cache` 中频次最高的股票全是退市/停牌股，导致 D 方案共识选股选出的 10 只中 9 只是退市股。
+`daily_scored_cache` 中频次最高的股票全是退市/停牌股，导致 D 方案共识选股选出的 10 只中 9 只为退市股，周一 08:30 推送的标的几乎全部不可交易。
 
-## 原因
+## 根因（勘误：原 v1 表述不准确）
 
-1. 退市股因子数据冻结在最后交易日，得分永远不变
-2. `cache_scored()` 写入 top 10 时未过滤非活跃股
-3. `consensus_picks()` 按频次排序，退市股每次都在 top 10，频次最高
+**v1（错）**：以为是 `portfolio/consensus.py` `cache_scored()` 写入时未过滤非活跃股。
 
-## 实测数据
+**v2（正确）**：真正污染源在 **`scripts/backfill_consensus_cache.py:105`**：
 
-cache top 10 频次排名（全部退市）：
+```python
+win = df[df["date_str"] <= D].tail(120)   # ← 不限定行的实际日期
+```
+
+对 2022 年退市的股票（如 002619），当 `D = 2026-04-17` 时，`tail(120)` 返回的是 2021–2022 那 120 行**冻结历史数据**——长度满足 `>= 20`，于是带着穿越的旧因子进了打分流程，最终写进 cache。
+
+live 路径 `factors/calculator.py:178` 用绝对日期范围过滤窗口，没这个 bug；所以只有 backfill 跑出来的 cache 受污染，每天 cron 跑 monitor-only 维护的 cache 是干净的。
+
+## 实测证据
+
+cache 中 freq=10 的退市股（002619 / 600393 / 000540 / 000961 / 000413 / 601258 / 002505 / 000040）全部出现在 **2026-04-17 ~ 2026-04-30** 这段——正好对应 backfill 跑的时间段；2026-05-02 那次 live 跑的 cache 干净。
+
+cache top 10 退市股频次（修复前快照）：
 
 | 代码 | 频次 | 最后交易日 |
 |------|------|-----------|
@@ -28,58 +39,33 @@ cache top 10 频次排名（全部退市）：
 | 000961 | 10 | 2024-05-08 |
 | 600321 | 10 | 2024-05-30 |
 
-D 方案 2026-05-06 共识选出的 10 只中，仅 000609 一只活跃（收益 +5.0%）。
+## 修复
 
-## 影响
-
-- 周一 08:30 共识选股推送的标的几乎全部不可交易
-- 回测中 D 方案的 alpha 可能被高估（回测脚本有 `fwd_return` 天然过滤了无数据股票）
-
-## 修复方案
-
-### 方案 A: 写入时过滤（推荐）
-
-`cache_scored()` 在写入前检查股票是否仍在交易：
+### 1. 主修复 — backfill 新鲜度守卫
+`scripts/backfill_consensus_cache.py:105` 后加：
 
 ```python
-# consensus.py cache_scored() 中
-from data.storage import load_stock_daily
-
-def _is_active(code, date_str):
-    df = load_stock_daily(code)
-    if df is None or df.empty:
-        return False
-    latest = df["date"].astype(str).str[:10].max()
-    return latest >= date_str
-
-# 入库前过滤
-rows = [r for r in rows if _is_active(r[1], date)]
+last_bar = pd.to_datetime(win.iloc[-1]["date_str"])
+if (pd.to_datetime(D) - last_bar).days > 7:
+    continue
 ```
 
-### 方案 B: 读取时过滤
+窗口最末一根 bar 距目标日 `D` 超过 7 天则视为非活跃股票跳过。
 
-`consensus_picks()` 返回结果后，在 `allocator.py` 调用处过滤：
+### 2. 兜底 — `cache_scored` 写入前过滤
+`portfolio/consensus.py` 增加 `_is_active(conn, code, date)` 工具，在 `cache_scored()` 入库前检查每个 code 在 `stock_{code}` 表里的最近 bar 是否距 `date` ≤ 7 天，否则跳过并 warn。双保险。
 
-```python
-# allocator.py get_stock_picks_consensus() 中
-cons = consensus_picks(end_date=today, window=window, top_n=top_n * 3)
-# 过滤非活跃
-from data.storage import load_stock_daily
-active_cons = [c for c in cons if is_tradeable(c["code"])]
-```
+### 3. 同款漏洞 — 回测脚本
+`scripts/backtest_year.py:135` 是同款 `tail(120)` 不校验最末 bar，已加同样的新鲜度守卫。回测中 `fwd_return` 天然剔除了退市股的收益贡献，所以绝对收益不会被夸大；但横截面 winsorize / z-score 受陈旧因子拉偏，因子排名失真，alpha 有高估倾向。
 
-### 方案 C: 两者都做（最安全）
-
-写入过滤 + 读取过滤双保险，并清理已有 cache。
-
-## 后续清理
-
-修复后需执行：
-
+### 4. 清理污染 cache
 ```sql
--- 清理 daily_scored_cache 中的退市股
--- 方案: 删除全部旧 cache，让系统重新积累干净数据
-DELETE FROM daily_scored_cache;
+DELETE FROM daily_scored_cache WHERE date <= '2026-04-30';
 ```
+保留 2026-05-02 干净 cache。备份在 `data/backup/daily_scored_cache_polluted_20260509.csv`。
 
-或用 backfill 脚本重填（如有）。
+## 经验
+
+- `tail(N)` 在退市/停牌场景下会静默返回**陈旧窗口**，长度检查 `len >= 20` 形同虚设——必须额外校验最末 bar 的**实际日期**。
+- 生产 live 路径用绝对日期范围过滤是正确写法（`factors/calculator.py:178`），backfill / 回测脚本应该对齐这一约定，而不是图便宜用 `tail(N)`。
+- 同样的 bug 模式可能潜伏在其他 `tail(...)` 调用里，未来如果新增 backfill 或离线评分脚本，code review 时优先查这个模式。

@@ -135,6 +135,11 @@ def main():
             win = df[df["date_str"] <= D].tail(120)
             if len(win) < 20:
                 continue
+            # 新鲜度守卫：回测期内退市/停牌的股票，tail(120) 会拿到陈旧窗口
+            # 进入横截面 winsorize/z-score，拉偏分布；这里把窗口最末 bar 距 D > 7 天的剔除
+            last_bar = pd.to_datetime(win.iloc[-1]["date_str"])
+            if (pd.to_datetime(D) - last_bar).days > 7:
+                continue
             f = {"code": sym}
             f.update(calc_momentum(win)); f.update(calc_volatility(win))
             f.update(calc_turnover_factor(win)); f.update(calc_volume_price(win))

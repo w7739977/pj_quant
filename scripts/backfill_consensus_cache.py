@@ -105,6 +105,11 @@ def main():
             win = df[df["date_str"] <= D].tail(120)
             if len(win) < 20:
                 continue
+            # 新鲜度守卫：退市/停牌股的 tail(120) 会返回远古数据，这里确保
+            # 窗口最末一根 bar 距目标日 D 不超过 7 天，否则视为非活跃股票跳过
+            last_bar = pd.to_datetime(win.iloc[-1]["date_str"])
+            if (pd.to_datetime(D) - last_bar).days > 7:
+                continue
             f = {"code": sym}
             f.update(calc_momentum(win))
             f.update(calc_volatility(win))

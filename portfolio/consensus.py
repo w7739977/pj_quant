@@ -50,6 +50,24 @@ def _init_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _is_active(conn: sqlite3.Connection, code: str, date: str, max_gap_days: int = 7) -> bool:
+    """检查 code 在 date 当日是否仍活跃（最近一根 bar 距 date 不超过 max_gap_days）。
+
+    用于阻止退市/停牌股污染 cache：backfill 主路径已加新鲜度守卫，这里是兜底双保险。
+    """
+    table = f"stock_{code}"
+    try:
+        row = conn.execute(
+            f"SELECT MAX(date) FROM {table} WHERE date <= ?", (date,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if not row or not row[0]:
+        return False
+    last_bar = str(row[0])[:10]
+    return (pd.to_datetime(date) - pd.to_datetime(last_bar)).days <= max_gap_days
+
+
 def cache_scored(date: str, scored_df: pd.DataFrame, top_n: int = 10) -> int:
     """
     缓存当日 top N 的 final_score（节省空间，共识只关心 top）
@@ -75,10 +93,18 @@ def cache_scored(date: str, scored_df: pd.DataFrame, top_n: int = 10) -> int:
     try:
         _init_table(conn)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        rows = [
-            (date, str(row["code"]), float(row["final_score"]), int(row["rank"]), now)
-            for _, row in sub.iterrows()
-        ]
+        rows = []
+        skipped = []
+        for _, row in sub.iterrows():
+            code = str(row["code"])
+            if not _is_active(conn, code, date):
+                skipped.append(code)
+                continue
+            rows.append((date, code, float(row["final_score"]), int(row["rank"]), now))
+        if skipped:
+            logger.warning(f"cache_scored {date}: 跳过非活跃股 {skipped}")
+        if not rows:
+            return 0
         conn.executemany(
             f"INSERT OR REPLACE INTO {TABLE} "
             f"(date, code, final_score, top_n_rank, updated_at) VALUES (?, ?, ?, ?, ?)",
