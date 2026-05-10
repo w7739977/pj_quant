@@ -11,12 +11,25 @@ from portfolio import consensus
 
 @pytest.fixture
 def temp_db(monkeypatch):
-    """每个测试用独立临时 SQLite"""
+    """每个测试用独立临时 SQLite。
+
+    默认 patch `_is_active` 始终通过：cache 写入 / consensus 排序的旧测试
+    与 stock_{code} 表是否存在无关；活跃度过滤的语义在 `test_is_active_*`
+    单独覆盖。
+    """
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     monkeypatch.setattr(consensus, "DB_PATH", path)
+    monkeypatch.setattr(consensus, "_is_active", lambda *a, **kw: True)
     yield path
     os.unlink(path)
+
+
+def _make_stock_table(conn: sqlite3.Connection, code: str, dates: list[str]) -> None:
+    conn.execute(f"CREATE TABLE stock_{code} (date TIMESTAMP, close REAL)")
+    for d in dates:
+        conn.execute(f"INSERT INTO stock_{code} VALUES (?, 10.0)", (d,))
+    conn.commit()
 
 
 def _make_scored(codes_scores):
@@ -126,3 +139,106 @@ def test_cache_stats(temp_db):
     assert stats["distinct_dates"] == 2
     assert stats["min_date"] == "2026-03-30"
     assert stats["max_date"] == "2026-03-31"
+
+
+# ============ 新鲜度守卫 — is_window_fresh ============
+
+def test_is_window_fresh_same_day():
+    """target == last_bar，gap=0，新鲜"""
+    assert consensus.is_window_fresh("2026-04-30", "2026-04-30") is True
+
+
+def test_is_window_fresh_at_threshold():
+    """gap == 7 边界仍视为新鲜"""
+    assert consensus.is_window_fresh("2026-04-23", "2026-04-30") is True
+
+
+def test_is_window_fresh_just_over():
+    """gap == 8 已超阈值，非新鲜"""
+    assert consensus.is_window_fresh("2026-04-22", "2026-04-30") is False
+
+
+def test_is_window_fresh_custom_threshold():
+    """自定义 max_gap_days 生效"""
+    assert consensus.is_window_fresh("2026-04-25", "2026-04-30", max_gap_days=5) is True
+    assert consensus.is_window_fresh("2026-04-24", "2026-04-30", max_gap_days=5) is False
+
+
+def test_is_window_fresh_accepts_timestamp_target():
+    """target 可以是 pd.Timestamp（hoist 优化路径）"""
+    assert consensus.is_window_fresh("2026-04-30", pd.Timestamp("2026-04-30")) is True
+
+
+# ============ 活跃度检查 — _is_active (SQL 路径) ============
+
+def _setup_active_db(monkeypatch):
+    """生成一个干净的临时 db 并连上，返回 (conn, path)"""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    monkeypatch.setattr(consensus, "DB_PATH", path)
+    return sqlite3.connect(path), path
+
+
+def test_is_active_active_stock(monkeypatch):
+    """有近期 bar 的股票视为活跃"""
+    conn, path = _setup_active_db(monkeypatch)
+    try:
+        _make_stock_table(conn, "000001", ["2026-04-29"])
+        assert consensus._is_active(conn, "000001", "2026-04-30") is True
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_is_active_delisted_stock(monkeypatch):
+    """陈旧 bar 距 target 超 7 天视为非活跃"""
+    conn, path = _setup_active_db(monkeypatch)
+    try:
+        _make_stock_table(conn, "002619", ["2022-03-31"])
+        assert consensus._is_active(conn, "002619", "2026-04-17") is False
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_is_active_table_missing(monkeypatch):
+    """stock_{code} 表不存在视为非活跃（不抛异常）"""
+    conn, path = _setup_active_db(monkeypatch)
+    try:
+        assert consensus._is_active(conn, "999999", "2026-04-30") is False
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_is_active_invalid_code_blocks_injection(monkeypatch):
+    """非 6 位数字 code 被 _safe_table_name 挡住，返回 False（不抛）"""
+    conn, path = _setup_active_db(monkeypatch)
+    try:
+        assert consensus._is_active(conn, '"; DROP TABLE foo; --', "2026-04-30") is False
+        assert consensus._is_active(conn, "abc", "2026-04-30") is False
+        assert consensus._is_active(conn, "12345", "2026-04-30") is False  # 5 位
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_cache_scored_filters_inactive(monkeypatch):
+    """cache_scored 集成测试：写入前 _is_active 过滤生效"""
+    conn, path = _setup_active_db(monkeypatch)
+    try:
+        # 000001 活跃，002619 退市
+        _make_stock_table(conn, "000001", ["2026-04-29"])
+        _make_stock_table(conn, "002619", ["2022-03-31"])
+        conn.close()
+
+        df = _make_scored([("000001", 1.0), ("002619", 2.0)])
+        n = consensus.cache_scored("2026-04-30", df, top_n=10)
+        assert n == 1  # 002619 被守卫过滤
+
+        history = consensus.load_recent_scored("2026-05-01", window=5)
+        codes = [c for c, _, _ in history["2026-04-30"]]
+        assert codes == ["000001"]
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
