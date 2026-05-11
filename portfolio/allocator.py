@@ -786,24 +786,39 @@ def get_stock_picks_consensus(stock_capital: float, top_n: int = 10,
     # Step 6: 把共识结果映射到今日 candidates 行
     cons_codes = [c["code"] for c in cons]
     candidates_idx = candidates.set_index("code", drop=False)
-    selected_rows = []
-    for c in cons:
-        code = c["code"]
-        if code in exclude:
-            continue
-        if code not in candidates_idx.index:
-            # 共识池外的股票（市值变化、停牌等）跳过
-            continue
-        row = candidates_idx.loc[code].copy()
-        row["consensus_freq"] = c["freq"]
-        row["consensus_avg_score"] = c["avg_score"]
-        row["consensus_days"] = days_avail
-        selected_rows.append(row)
-        if len(selected_rows) >= top_n * 2:  # 留余量给 ST/停牌过滤
-            break
+    def _try_intersect(cons, idx, label):
+        rows = []
+        for c in cons:
+            code = c["code"]
+            if code in exclude or code not in idx.index:
+                continue
+            row = idx.loc[code].copy()
+            row["consensus_freq"] = c["freq"]
+            row["consensus_avg_score"] = c["avg_score"]
+            row["consensus_days"] = days_avail
+            row["_cons_source"] = label
+            rows.append(row)
+            if len(rows) >= top_n * 2:
+                break
+        return rows
+
+    # 第 1 层: cons ∩ candidates (factor top 50) — 最严，picks 在今日 factor 顶部
+    selected_rows = _try_intersect(cons, candidates_idx, "factor_top50")
+
+    # 第 2 层: cons ∩ scored (整个池 1600+ 只) — 退一步，picks 至少在池中
+    # 之前 5/11 触发的就是这种情况: cons 大量 ST 经跌停后 factor 排名掉出 top 50，
+    # 但仍在 pool 里。退一步用 pool 索引能让共识 picks 正确落地，避免 fallback 到日频。
+    if not selected_rows:
+        scored_idx = scored.set_index("code", drop=False)
+        selected_rows = _try_intersect(cons, scored_idx, "pool_full")
+        if selected_rows:
+            logger.warning(
+                f"共识 ∩ factor top 50 为空，二级 fallback 到 cons ∩ pool: "
+                f"{len(selected_rows)} 只 (5/11 同款 bug 路径)"
+            )
 
     if not selected_rows:
-        logger.warning("共识结果与今日池子无交集，回退到日频")
+        logger.warning("共识结果与今日池子完全无交集 (cons 全部停牌/退市/超池)，回退到日频")
         return get_stock_picks_live(stock_capital, top_n, exclude_codes=exclude_codes)
 
     filtered = pd.DataFrame(selected_rows).reset_index(drop=True)
