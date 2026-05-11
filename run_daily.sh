@@ -86,11 +86,11 @@ fi
 echo "[$(date +%H:%M:%S)] 归档信号..." | tee -a "$LOG_FILE"
 python3 scripts/postflight.py 2>&1 | tee -a "$LOG_FILE" || true
 
-# 阶段四：picks_history 评估（仅周一跑）
-# picks 每周一推 + 5 工作日 = 下周一到期；其他天跑都是空查 (skipped 全部)。
-# 节假日顺延的边界 case 会延迟 1-5 天评估，不影响统计准确性 (evaluate_pending 幂等)。
-if [ "$WEEKDAY" -eq 1 ]; then
-    echo "[$(date +%H:%M:%S)] picks_history 评估 (周一)..." | tee -a "$LOG_FILE"
+# 阶段四：picks_history 评估（3d: 周一/三/五跑）
+# picks 每周一/三/五推 + 5 工作日 → 5d 到期日也是周一/三/五；这三天跑评估最及时。
+# 周二/周四跑都是空查 (skipped 全部)。evaluate_pending 幂等。
+if [ "$WEEKDAY" -eq 1 ] || [ "$WEEKDAY" -eq 3 ] || [ "$WEEKDAY" -eq 5 ]; then
+    echo "[$(date +%H:%M:%S)] picks_history 评估 (周$WEEKDAY)..." | tee -a "$LOG_FILE"
     python3 -c "
 from portfolio.picks_history import evaluate_pending
 print('  evaluate_pending:', evaluate_pending())
