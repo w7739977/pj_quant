@@ -814,24 +814,8 @@ def get_stock_picks_consensus(stock_capital: float, top_n: int = 10,
     final_picks = _finalize_picks(filtered, candidates, pred, ml_rank_map,
                                    stock_capital, top_n, extra_reason=extra)
 
-    # 前向 OOS 累积：记录推送的 picks 到 picks_history 表（5d 后由
-    # evaluate_pending 自动算实际收益）。失败不阻塞推送主流程。
-    try:
-        from portfolio.picks_history import record_picks
-        cons_meta = {c["code"]: c for c in cons}
-        history_picks = [
-            {
-                "code": p.get("code"),
-                "freq": cons_meta.get(p.get("code"), {}).get("freq", 0),
-                "avg_score": cons_meta.get(p.get("code"), {}).get("avg_score", 0.0),
-            }
-            for p in final_picks if p.get("code")
-        ]
-        n = record_picks(today, history_picks, pick_top_n=top_n)
-        logger.info(f"picks_history 记录: {n} 只 picks (date={today})")
-    except Exception as e:
-        logger.warning(f"picks_history 记录失败 (不阻塞推送): {e}")
-
+    # picks_history 记录移到 run_live_deploy 顶层 (line ~990)，覆盖三条路径
+    # (consensus / live / consensus-fallback-to-live)。这里不再 record。
     return final_picks
 
 
@@ -975,6 +959,26 @@ def run_live_deploy(push: bool = False, simulate: bool = False,
                 print(f"    {a['name']}({a['code']})"
                       f" {a['shares']}股@{a['price']:.2f}"
                       f" = {a['amount']:,.0f}元 {a['reason']}")
+            # 前向 OOS 累积: 顶层记录最终推送的 picks，覆盖 consensus / live /
+            # consensus-fallback-to-live 三条路径。原来只在 get_stock_picks_consensus
+            # 末尾 record，会漏掉 fallback 路径（共识空交集时回退到日频）。
+            try:
+                from portfolio.picks_history import record_picks
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                history_picks = [
+                    {
+                        "code": a.get("code"),
+                        "freq": (a.get("reason_data") or {}).get("consensus_freq", 0),
+                        "avg_score": (a.get("reason_data") or {}).get(
+                            "consensus_avg_score", 0.0
+                        ),
+                    }
+                    for a in buy_actions if a.get("code")
+                ]
+                n = record_picks(today_str, history_picks, pick_top_n=NUM_POSITIONS)
+                logger.info(f"picks_history 记录 (顶层): {n} 只 (date={today_str})")
+            except Exception as e:
+                logger.warning(f"picks_history 顶层记录失败 (不阻塞): {e}")
         else:
             print("  未选出合适的股票")
     elif slots == 0:
