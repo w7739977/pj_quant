@@ -108,6 +108,24 @@ feature_importance['sentiment_score'] = 0.0000（连续多次 evolve 排名 #20/
 - 推送层（仅 top 10 推荐）仍调实时情绪 API，1 秒内完成
 - 长期方案见下方"sentiment_history 历史回填"
 
+### 4. Pool 层 ST 过滤独立上线 (2026-05-12, task #25 实证后暂停)
+
+**尝试**：`factors.data_loader._filter_st` 从 pool 入口剔除所有 name 含 ST/*ST 的股票，让因子计算 / 模型预测 / cache 全栈不见 ST。
+
+**实测结果**（2025-01-03 ~ 2026-04-27, 16 个月）：
+
+| 指标 | 含 ST 池 (生产现状) | ST 过滤池 | 变化 |
+|------|---:|---:|---:|
+| 累计 α (d 方案) | +73.4% | **+8.79%** | **-64.6pp ⬇️** |
+| Profit Factor | 1.79 | 1.45 | -0.34（跌破 1.5 业界合格线）|
+| Expectancy（单只）| +1.44% | +0.74% | -0.70pp |
+
+**结论**：模型 70-80% alpha 来自 ST 反弹机。ST 过滤后真 α 扣交易成本接近 0。当前 22 因子在非 ST 池上无显著 edge。
+
+**决策**：暂停 ST 过滤上生产。代码保留在 `feature/st-filter-future` 分支（commit `efecc53`），未 push main。下一阶段先做因子库扩展（P1.5）再评估重启 ST 过滤。
+
+详见：`docs/backtest_st_filter_finding.md`
+
 ---
 
 ## P0 — 高优先级（建议本周做）
