@@ -52,3 +52,6 @@ ml/model_history.json
 data/fundamentals_parquet/
 ml/training_chunks/
 *.parquet
+
+# repomix
+repomix-output.xml

@@ -1,0 +1,32 @@
+{
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "compress": false,
+    "removeComments": false,
+    "showLineNumbers": false,
+    "topFilesLength": 15,
+    "headerText": "pj_quant: A 股小盘股量化选股策略\n方法论框架见 docs/VALIDATION_PHILOSOPHY.md\n当前阶段 L2 (信号质量评估), 不是实盘 PnL\n模型主要 alpha 来自 ST 反弹 (见 docs/backtest_st_filter_finding.md)"
+  },
+  "include": [],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "docs/archive/**",
+      ".claude/skills/**/scripts/**",
+      ".claude/skills/**/references/**",
+      "**/*.ipynb",
+      "logs/**",
+      "data/backup/**",
+      "data/*.bak.*",
+      "data/*.parquet*",
+      "repomix-output.xml",
+      "**/__pycache__/**",
+      "**/.pytest_cache/**"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}
