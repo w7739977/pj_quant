@@ -40,6 +40,7 @@ def evolve(push: bool = False) -> dict:
         train_model, get_model_info, PRODUCTION_MODEL, FEATURE_COLS,
     )
     from factors.calculator import compute_stock_pool_factors
+    import os  # 用于本函数内 PRODUCTION_MODEL 路径判断
 
     _ensure_dirs()
 
@@ -100,9 +101,11 @@ def evolve(push: bool = False) -> dict:
     print(f"  训练样本: {len(train_df)} 条")
     report["steps"]["factors"]["train_samples"] = len(train_df)
 
-    # === Step 4: 训练新模型（自动版本管理） ===
-    print("\n[4/5] 训练新模型...")
-    result = train_model(train_df)
+    # === Step 4: 训练新模型 (defer_promotion, 让 L2 evaluator 决定) ===
+    # P1.1 (2026-05-16): 旧逻辑用 R² 判 is_new_best, BDE 实证 R²↓74% 但 L2↑15pp,
+    # R² 会阻止 B 这种「真改善」模型上线. 改为 defer_promotion + L2 评估自己 promote.
+    print("\n[4/5] 训练新模型 (defer_promotion=True)...")
+    result = train_model(train_df, defer_promotion=True)
 
     if not result:
         report["decision"] = "ABORT: 训练失败"
@@ -110,33 +113,51 @@ def evolve(push: bool = False) -> dict:
         return _finish_report(report, push)
 
     new_r2 = result["cv_r2_mean"]
-    is_best = result.get("is_new_best", True)
+    candidate_path = result["candidate_path"]
 
     report["steps"]["training"] = {
         "new_r2": new_r2,
         "new_r2_std": result["cv_r2_std"],
         "train_samples": result["train_samples"],
-        "is_new_best": is_best,
         "old_r2": old_r2,
+        "candidate_path": candidate_path,
         "top_factors": list(result.get("feature_importance", {}).keys())[:5],
     }
 
-    # 因子重要性
     importance = result.get("feature_importance", {})
+    print(f"  R²: 新 {new_r2:.4f} vs 旧 {old_r2} (仅供参考, 不作上线判定)")
     print(f"  Top 5 因子:")
     for i, (f, v) in enumerate(list(importance.items())[:5], 1):
         print(f"    {i}. {f}: {v:.4f}")
-
     report["steps"]["factors"]["top5"] = list(importance.items())[:5]
 
-    if is_best:
-        report["decision"] = f"✓ 上线新模型 (R² {old_r2}→{new_r2})"
-        print(f"  ✓ 新模型 R²={new_r2:.4f} ≥ 旧模型 R²={old_r2}，已上线!")
-    else:
-        report["decision"] = f"⚠ 保留旧模型 (新 R²={new_r2} < 旧 {old_r2})"
-        print(f"  → 新模型 R²={new_r2:.4f} < 旧模型 R²={old_r2}，保留旧模型")
+    # === Step 5: L2 评估 (从 2024-01-01 起, 跑两个模型对照) ===
+    print("\n[5/6] L2 mini-backtest 评估新/旧模型...")
+    is_best = _l2_promotion_check(
+        candidate_path=candidate_path,
+        factor_df=factor_df,
+        report=report,
+    )
 
-    # === Step 5: 回测验证（informational，不影响上线决策）===
+    if is_best:
+        # 把 candidate 升为 PRODUCTION_MODEL
+        import shutil
+        if os.path.exists(PRODUCTION_MODEL):
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(PRODUCTION_MODEL, os.path.join("ml/models", f"xgb_ranker_{ts}.json"))
+        shutil.copy2(candidate_path, PRODUCTION_MODEL)
+        # 保存 feature_importance + history
+        from ml.ranker import IMPORTANCE_PATH, _save_history
+        with open(IMPORTANCE_PATH, "w") as f:
+            json.dump(importance, f, indent=2, ensure_ascii=False)
+        _save_history(new_r2, result["cv_r2_std"], result["train_samples"], importance)
+        report["decision"] = "✓ 上线新模型 (L2 排 ST 累计 α 优于旧)"
+        print(f"  ✅ 新模型 L2 胜出, 已上线 (R² {old_r2}→{new_r2})")
+    else:
+        report["decision"] = "⚠ 保留旧模型 (L2 排 ST 累计 α 未升)"
+        print(f"  → 新模型 L2 未优于旧, 保留旧模型 (candidate: {candidate_path})")
+
+    # === Step 6: 短期 4 周健康度检查 (informational) ===
     backtest_summary = _run_post_evolve_backtest(weeks=4)
     if backtest_summary:
         report["steps"]["backtest_4w"] = backtest_summary
@@ -149,6 +170,74 @@ def evolve(push: bool = False) -> dict:
         _push_report(report)
 
     return report
+
+
+def _l2_promotion_check(candidate_path: str, factor_df, report: dict) -> bool:
+    """
+    P1.1: 用 L2 evaluator 对照新候选 vs 旧生产模型, 决定是否 promote.
+
+    判定指标: 排 ST 累计 α (用户决策, 2026-05-16)
+    时间窗: 2024-01-01 起 (固定起点)
+
+    Returns
+    -------
+    True = 新模型胜, promote; False = 保留旧模型
+    """
+    from ml.ranker import PRODUCTION_MODEL
+    from ml.l2_evaluator import evaluate_model_l2, DEFAULT_START
+    import os
+
+    pool_codes = factor_df["code"].tolist() if "code" in factor_df.columns else []
+    if not pool_codes:
+        logger.warning("L2 promotion check: factor_df 无 code 列, 默认拒 promote")
+        report["steps"]["l2_eval"] = {"error": "factor_df 无 code 列"}
+        return False
+
+    # 旧模型 L2
+    if not os.path.exists(PRODUCTION_MODEL):
+        # 首次部署, 无旧模型 → 默认 promote
+        logger.info("L2 promotion check: 无旧 PRODUCTION_MODEL, 默认 promote")
+        report["steps"]["l2_eval"] = {"first_deploy": True}
+        return True
+
+    print(f"  跑旧模型 L2 ({PRODUCTION_MODEL})...")
+    try:
+        old_l2 = evaluate_model_l2(PRODUCTION_MODEL, pool_codes, start_date=DEFAULT_START)
+    except Exception as e:
+        logger.warning(f"旧模型 L2 失败: {e}, 默认 promote 新模型")
+        report["steps"]["l2_eval"] = {"old_eval_error": str(e)}
+        return True
+
+    print(f"  跑新候选 L2 ({candidate_path})...")
+    try:
+        new_l2 = evaluate_model_l2(candidate_path, pool_codes, start_date=DEFAULT_START)
+    except Exception as e:
+        logger.error(f"新候选 L2 失败: {e}, 拒 promote 保守")
+        report["steps"]["l2_eval"] = {"new_eval_error": str(e)}
+        return False
+
+    old_alpha = old_l2["cum_alpha_no_st"]
+    new_alpha = new_l2["cum_alpha_no_st"]
+    if pd.isna(new_alpha) or pd.isna(old_alpha):
+        logger.warning(f"L2 评估有 nan (old={old_alpha} new={new_alpha}), 拒 promote 保守")
+        report["steps"]["l2_eval"] = {"nan_result": True,
+                                      "old": old_l2, "new": new_l2}
+        return False
+
+    delta = new_alpha - old_alpha
+    promote = delta > 0
+    report["steps"]["l2_eval"] = {
+        "old_cum_alpha_no_st": round(old_alpha, 4),
+        "new_cum_alpha_no_st": round(new_alpha, 4),
+        "delta_pp": round(delta * 100, 2),
+        "old_pf_no_st": round(old_l2["pf_no_st"], 2),
+        "new_pf_no_st": round(new_l2["pf_no_st"], 2),
+        "n_weeks": new_l2["n_weeks"],
+        "promote": promote,
+    }
+    print(f"  L2 排 ST 累计 α: 旧 {old_alpha*100:+.2f}% → 新 {new_alpha*100:+.2f}% "
+          f"(Δ {delta*100:+.2f}pp) → {'PROMOTE' if promote else 'KEEP OLD'}")
+    return promote
 
 
 def _run_post_evolve_backtest(weeks: int = 4) -> dict:

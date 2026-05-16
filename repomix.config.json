@@ -6,7 +6,7 @@
     "removeComments": false,
     "showLineNumbers": false,
     "topFilesLength": 15,
-    "headerText": "pj_quant: A 股小盘股量化选股策略\n方法论框架见 docs/VALIDATION_PHILOSOPHY.md\n当前阶段 L2 (信号质量评估), 不是实盘 PnL\n模型主要 alpha 来自 ST 反弹 (见 docs/backtest_st_filter_finding.md)"
+    "headerText": "pj_quant: A 股小盘股量化选股策略\n方法论: docs/VALIDATION_PHILOSOPHY.md (L1-L4); backlog: docs/optimization_backlog.md\n当前阶段: P1 评估体系改造 — L2 排 ST 累计 α 替代 R² 作 evolve 上线判定 (2026-05-16)\n生产现状: 5/2 训练的 23 因子 baseline + 周一 D 共识 + 含 ST 池\n近期实证 (5/12-5/16):\n  - task #25: ST 反弹机贡献 70-80% alpha (排 ST 后真 α 接近 0)\n  - P0 双子套 (失败): 9 新因子 chip+ohlc 让排 ST α 跌 -25pp\n  - B 标签改革 (成功): excess return label 让排 ST α +15pp, PF 1.42→1.69, 等部署\n  - D 动态止损 (失败): MA20 + trail 在 5d hold 上水土不服\n  - E 财务因子 IC 审计 (4 全保留, ROE IR=+0.63 最强)"
   },
   "include": [],
   "ignore": {

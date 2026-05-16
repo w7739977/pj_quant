@@ -54,6 +54,7 @@ def prepare_training_data(
     factor_df: pd.DataFrame,
     forward_days: int = 20,
     end_date: str = None,
+    label_mode: str = "excess",
 ) -> pd.DataFrame:
     """
     准备训练数据: 基于本地缓存的滚动截面生成 (因子 + 未来N日收益率)
@@ -67,6 +68,9 @@ def prepare_training_data(
     factor_df : DataFrame  当日因子矩阵（用于确定股票池）
     forward_days : int  前瞻天数
     end_date : str  未使用，保留接口兼容
+    label_mode : str  "excess" (默认, P1.2-B 实证后切换) = 减去截面均值的超额收益;
+                      "raw" = 绝对涨幅 (旧默认, 跟 L2 评估口径不对齐)
+                      P1.2-B 实证: excess 让排 ST 累计 α +16% → +31% (16 个月 / 62 周)
 
     Returns
     -------
@@ -142,6 +146,17 @@ def prepare_training_data(
 
     if train_df.empty:
         return train_df
+
+    # === P1.2-B 超额收益标签 ===
+    # 把绝对涨幅改为「相对截面均值的超额收益」, 让模型学相对强弱而不是绝对涨多少
+    # Livermore + Edwards/Magee + Douglas 三方共识 (相对强弱原则)
+    if label_mode == "excess":
+        section_mean = train_df.groupby("end_date")["label"].transform("mean")
+        before_std = train_df["label"].std()
+        train_df["label"] = train_df["label"] - section_mean
+        after_std = train_df["label"].std()
+        logger.info(f"  label 改为超额收益 (excess): mean={train_df['label'].mean():.4f}, "
+                    f"std {before_std:.4f}→{after_std:.4f}")
 
     # === 极值缩尾（防御性，必跑） ===
     # 实证发现 Tushare 财务数据存在异常值（重组/ST/并表口径变化导致）：
@@ -226,13 +241,23 @@ def _lookup_financial_pit(code: str, as_of_yyyymmdd: str) -> dict:
     return history[idx][1]
 
 
-def train_model(train_df: pd.DataFrame) -> dict:
+def train_model(train_df: pd.DataFrame, defer_promotion: bool = False) -> dict:
     """
     训练 XGBoost 排名模型（带版本管理）
 
+    Parameters
+    ----------
+    train_df : DataFrame
+    defer_promotion : bool (P1.1, 2026-05-16)
+        False (默认, 保持现有行为): 用 R² 判定 is_new_best, 自动替换 PRODUCTION_MODEL
+        True: 不动 PRODUCTION_MODEL, 模型保存到 candidate_path,
+              让调用方 (auto_evolve) 用 L2 evaluator 自行决定 promote
+              (R² 判定有缺陷: P1.2-B 实证 R² -74% 但 L2 +15pp, 应该上线但 R² 判定会拒)
+
     Returns
     -------
-    dict: {model_path, metrics, feature_importance, is_new_best}
+    dict: {model_path, metrics, feature_importance, is_new_best, candidate_path}
+        defer_promotion=True 时 model_path = candidate_path, is_new_best 不可信
     """
     from xgboost import XGBRegressor
     from sklearn.model_selection import TimeSeriesSplit, cross_val_score
@@ -302,6 +327,7 @@ def train_model(train_df: pd.DataFrame) -> dict:
     new_r2 = round(float(cv_scores.mean()), 4)
 
     # === 版本管理：对比新旧模型 ===
+    candidate_path = os.path.join(MODEL_DIR, "xgb_ranker_candidate.json")
     is_new_best = True
     old_r2 = None
 
@@ -311,6 +337,23 @@ def train_model(train_df: pd.DataFrame) -> dict:
         if old_r2 is not None and new_r2 < old_r2:
             is_new_best = False
             logger.info(f"新模型 R²={new_r2:.4f} < 旧模型 R²={old_r2:.4f}，保留旧模型")
+
+    if defer_promotion:
+        # P1.1: 不动 PRODUCTION_MODEL, 只存 candidate, 让调用方用 L2 evaluator 决定
+        model.save_model(candidate_path)
+        logger.info(f"defer_promotion=True → 模型存为 candidate ({candidate_path}), "
+                    f"PRODUCTION_MODEL 不动. 调用方应用 L2 evaluator 自行 promote.")
+        return {
+            "model_path": candidate_path,
+            "candidate_path": candidate_path,
+            "train_samples": len(X),
+            "cv_r2_mean": new_r2,
+            "cv_r2_std": round(float(cv_scores.std()), 4),
+            "feature_importance": importance,
+            "is_new_best": None,  # 不可信, 让调用方判
+            "old_r2": old_r2,
+            "deferred": True,
+        }
 
     if is_new_best:
         # 备份旧模型
@@ -331,12 +374,12 @@ def train_model(train_df: pd.DataFrame) -> dict:
         logger.info(f"新模型已上线: R²={new_r2:.4f}, samples={len(X)}")
     else:
         # 仍然保存新模型作为候选，但不替换生产模型
-        candidate_path = os.path.join(MODEL_DIR, "xgb_ranker_candidate.json")
         model.save_model(candidate_path)
         logger.info(f"新模型已保存为候选: {candidate_path}")
 
     result = {
         "model_path": PRODUCTION_MODEL if is_new_best else candidate_path,
+        "candidate_path": candidate_path,
         "train_samples": len(X),
         "cv_r2_mean": new_r2,
         "cv_r2_std": round(float(cv_scores.std()), 4),

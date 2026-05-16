@@ -11,7 +11,7 @@ build/
 data/quant.db*
 data/sim_trading.db*
 data/backup/
-ml/models/*.json
+ml/models/*
 !ml/models/.gitkeep
 
 # Concurrency lock

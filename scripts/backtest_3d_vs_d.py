@@ -153,6 +153,22 @@ def main():
     model = XGBRegressor()
     model.load_model(PRODUCTION_MODEL)
     pool = get_small_cap_stocks(5e8, 5e9)
+    if pool.empty:
+        # fallback: 本地数据滞后导致 _filter_active 卡死 → 用 cached 全量 + total_mv 筛
+        from data.storage import list_cached_stocks
+        print("  pool 为空 (本地数据滞后), 用 cache 兜底...")
+        rows = []
+        for sym in list_cached_stocks():
+            df = load_stock_daily(sym)
+            if df is None or df.empty or len(df) < 120:
+                continue
+            mv = df["total_mv"].dropna()
+            if mv.empty:
+                continue
+            cap = float(mv.iloc[-1]) * 1e4
+            if 5e8 <= cap <= 5e9:
+                rows.append({"code": sym, "market_cap": cap})
+        pool = pd.DataFrame(rows)
     print(f"  pool: {len(pool)} 只")
 
     print("\n[2/5] 取交易日 + 预加载日线...")
