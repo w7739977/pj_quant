@@ -128,6 +128,34 @@ feature_importance['sentiment_score'] = 0.0000（连续多次 evolve 排名 #20/
 
 ---
 
+### ⚠️ 5.5 BDE 窗口反转警示 (2026-05-16)
+
+**事件**: B 标签改革 (excess label) 在两个窗口下结论完全相反:
+
+| 窗口 | raw baseline | B (excess) | 差异 |
+|---|---:|---:|---:|
+| **16 月 (2025-01-01~2026-04-30, 62 周)** | +16.18% | +31.41% | **B 胜 +15pp** ✓ |
+| **28 月 (2024-01-01~2026-04-30, 110 周)** | +42.54% | +15.48% | **B 输 -27pp** ✗ |
+
+差异 110pp 完全颠覆结论。2024 年独立 12 个月: raw +26pp, excess -16pp.
+
+**根因**: Bailey & Lopez de Prado 2014 PBO (Probability of Backtest Overfitting) — 单窗口 cherry-pick.
+
+**强制规则 (5/16 起)**:
+1. 所有 backtest 默认窗口 ≥ 28 月 (110 周, 接近 DSR 80 周阈值)
+2. 关键决策必看 ≥ 2 个不重叠子窗口对照 (如 2024 / 2025-26 分开看)
+3. 任何 16 月窗口下「成功」的方向 → 默认怀疑, 必须 28 月重验
+4. `ml/l2_evaluator.py` 默认 start_date=2024-01-01 (DEFAULT_START 常量)
+
+**待重验清单**:
+- task #25 ST 过滤实验 (含 ST +73.4% / 排 ST +8.79%) — 16 月数据
+- P0 双子套失败 (-15.85%) — 16 月数据
+- task #21 早期 ST 反弹机发现 — 不确定窗口
+
+详见 `ml/l2_evaluator.py` 代码注释 + commit `669f4ae` PR 描述.
+
+---
+
 ### 5. P0 双子套 — 筹码因子 + OHLC 振幅影线（2026-05-16, 实证失败）
 
 **尝试**：22 → 31 因子，加广发证券筹码因子（CYQK_C/ASR/CKDW/PRP/CGO）+ 东吴证券 OHLC 振幅影线（upper/lower_shadow_20d, amplitude_20d/std_20d）。
