@@ -128,9 +128,77 @@ feature_importance['sentiment_score'] = 0.0000（连续多次 evolve 排名 #20/
 
 ---
 
+### 5. P0 双子套 — 筹码因子 + OHLC 振幅影线（2026-05-16, 实证失败）
+
+**尝试**：22 → 31 因子，加广发证券筹码因子（CYQK_C/ASR/CKDW/PRP/CGO）+ 东吴证券 OHLC 振幅影线（upper/lower_shadow_20d, amplitude_20d/std_20d）。
+
+**单因子 IC 验证**（5720 只 × 8 截面）：
+
+| 类型 | 因子 | IC | IR | 判定 |
+|---|---|---|---|---|
+| 达标（3 个） | lower_shadow_20d / CKDW / amplitude_std_20d | 0.027~0.055 | 0.31~0.47 | ✓ |
+| 不达标（6 个） | CYQK_C / ASR / PRP / CGO / upper_shadow_20d / amplitude_20d | < 0.02 | < 0.3 | ✗ |
+
+**重训模型 + L2 回测结果**（同 task #25 区间 16 个月 / 62 周）：
+
+| 指标 | 旧模型 (22 因子) | P0 新模型 (31 因子) | 变化 |
+|---|---:|---:|---:|
+| CV R² | 0.0784 | 0.0761 | -2.9% |
+| 排 ST 累计 α | +8.79% | **-15.85%** | **-24.6pp ⬇️⬇️** |
+| 排 ST Profit Factor | 1.45 | 1.06 | -0.39 |
+| 含 ST 累计 α | +73.4% | +26.10% | -47pp ⬇️ |
+| 新因子进 top 15 importance | n/a | 4 个 (CGO #8, lower_shadow #10, amplitude_20d #13, PRP #14) | - |
+
+**结论**：新因子让模型「分散」（不再过度依赖 ST 反弹机），但没找到新 α 源，连「老本」都丢掉。XGBoost 在弱 IC 因子（PRP/CGO）上拟合了非线性噪声，importance 高但预测力反向。
+
+**决策**：实验代码保留在 `feature/p0-twin-factors-failed` 分支（commit `3b9292e`），未 push main。task #25 决策树触发「因子扩展方向不对」→ 转 P1.2 模型架构调整。
+
+详见：`docs/backtest_p0_twin_factors_failed.md`（feature 分支）
+
+---
+
 ## P0 — 高优先级（建议本周做）
 
-### 4. P0 财务因子全链路验收（已实施代码，待数据 + 验证）
+### P1.2-A 池子改革（最优先，~半天）
+
+**动机**：P0 双子套失败实证「在含 ST 池上做特征工程会被 ST 反弹噪声带偏」。从源头杜绝噪声 + 排除客户不可交易标的。
+
+**改动**：
+- `factors/data_loader.py` 启用 `_filter_st`（commit `efecc53` 已现成）
+- `_filter_active` 守卫加严（≤ 5 交易日，已有）
+- 新增 `_filter_min_turnover`：最近 20 日均换手率 > 0.5%
+- 市值下限上调 5e8 → 1e9（剔除超小盘流动性陷阱）
+
+**判定**：纯池子改革（不动模型 / 因子）即可让排 ST 累计 α 从 +8.79% → ≥ +12%？若达标说明 task #25 的天花板是「池子噪声」而不是「模型上限」。
+
+### P1.2-B 标签改革（~半天）
+
+**动机**：当前 forward return 是「绝对 20d 涨幅」，跟 L2 评估口径「跑赢池均值的 5d alpha」不对齐。模型在学错的东西。
+
+**改动**：`ml/ranker.py:prepare_training_data` 把 `forward_return = close[t+20]/close[t] - 1.0` 改为：
+- `bench = mean(forward_return)` over all stocks at same end_date
+- `label = forward_return - bench`
+
+让模型学「相对强弱」而不是「绝对涨多少」。
+
+**判定**：标签改革后 R² 通常会降（绝对 ret 信息丰，相对 ret 更干净），但 L2 累计 α 应改善 — 这正是 task #21 / #25 反复验证的「L1 ≠ L2」。
+
+### P1.2-C 模型架构（LightGBM + walk-forward CV，~2-3 天）
+
+**动机**：单一 XGBoost 可能拟合不稳。LightGBM + ensemble 在 Kaggle 是常胜方案；walk-forward 用滚动窗口验证避免 future leak。
+
+**改动**：
+- 新建 `ml/lgbm_ranker.py`（LightGBM 训练 / 预测）
+- 改 `ml/ranker.py` 加 walk-forward CV（按 end_date 滑动训练窗口）
+- ensemble 接口：XGBoost 60% + LightGBM 40%
+
+**判定**：DSR 显著性 + R² 跨窗稳定性提升（标准差 < XGB 单模型）+ L2 累计 α 改善。
+
+**实施顺序建议**：A → B → C（每步都有独立 L2 验证抓点；前两步投入小见效快；C 是兜底）。
+
+---
+
+### ~~4. P0 财务因子全链路验收（已 5/2 实施完成）~~
 
 **状态**：代码已 commit `6811d04`，待执行：
 
